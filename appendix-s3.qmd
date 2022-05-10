@@ -1,0 +1,55 @@
+---
+title: "Appendix S3: Results and discussion of recapture probabilities"
+author: |
+  | Matthijs Hollanders, Laura F. Grogan, Catherine J. Nock, Hamish I. McCallum, David A. Newell
+  | 
+  | Manuscript: Recovered frog populations coexist with endemic *Batrachochytrium dendrobatidis* despite intensity-dependent mortality
+  | Journal: Ecological Applications
+format:
+  pdf:
+    toc: true
+    header-includes: |
+      \usepackage{titling}
+      \pretitle{\begin{flushleft}\Large\bfseries}
+      \posttitle{\end{flushleft}}  
+      \preauthor{\begin{flushleft}\large}
+      \postauthor{\end{flushleft}}  
+      \predate{\begin{flushleft}\large}
+      \postdate{\end{flushleft}}
+execute:
+  echo: false
+  warning: false
+fontsize: 11pt
+bibliography: chapter1.bib
+csl: ecological-applications.csl
+nocite:
+geometry: margin = 1in
+---
+
+```{r}
+options(scipen = 10, digits = 3)
+library(tidyverse)
+library(HDInterval)
+
+m2 <- read_csv('mcmc-samples/m2-draws.csv')
+m2[m2 == 0] <- NA
+m2 <- m2 %>%
+  mutate(`phi.alpha.mu` = exp((3 * log(`phi.alpha`) + `eps.site[1, 1]` + `eps.site[1, 2]` + `eps.site[1, 3]`) / 3),
+         `psi12.alpha.mu` = exp((3 * log(`psi12.alpha`) + `eps.site[2, 1]` + `eps.site[2, 2]` + `eps.site[2, 3]`) / 3),
+         `psi21.alpha.mu` = exp((3 * log(`psi21.alpha`) + `eps.site[3, 1]` + `eps.site[3, 2]` + `eps.site[3, 3]`) / 3),
+         `p.alpha.mu` = plogis((3 * qlogis(`p.alpha`) + `eps.site[4, 1]` + `eps.site[4, 2]` + `eps.site[4, 3]`) / 3))
+```
+
+\newpage
+
+# Results
+
+Average site-specific recapture probabilities ranged from `r median(plogis(qlogis(m2$'p.alpha') + m2$'eps.site[4, 1]'))`--`r median(plogis(qlogis(m2$'p.alpha') + m2$'eps.site[4, 2]'))` (Appendix S2: Table S2). Body condition significantly predicted recapture probability (log odds change `r median(na.omit(m2$'p.beta[5]'))` [`r hdi(m2$'p.beta[5]')`], *pd* = `r round(length(which(m2$'p.beta[5]' > 0)) / (nrow(m2)-length(which(is.na(m2$'p.beta[5]'))))*100,1)`%, `r round((1-(length(which(m2$'p.beta[5]' > 0.09)) / (nrow(m2)-sum(is.na(m2$'p.beta[5]')))))*100,1)`% in ROPE, `r round(sum(na.omit(m2$'p.w[5]'))/nrow(m2)*100,1)`% inclusion), and females had significantly lower recapture probability compared to males (log odds change `r median(na.omit(m2$'p.beta[1]'))` [`r hdi(m2$'p.beta[1]')`], *pd* = `r round(length(which(m2$'p.beta[1]' < 0)) / (nrow(m2)-length(which(is.na(m2$'p.beta[1]'))))*100,1)`%, `r round((1-(length(which(m2$'p.beta[1]' < -0.09)) / (nrow(m2)-sum(is.na(m2$'p.beta[1]')))))*100,1)`% in ROPE, `r round(sum(na.omit(m2$'p.w[1]'))/nrow(m2)*100,1)`% inclusion) (Appendix S2: Table S2 and Figure S3a). Detection probabilities peaked in summer and dipped in winter (Figure 3d, Appendix S2: Table S2 and Figure S2d). Daily temperature (log odds change `r median(na.omit(m2$'p.beta[2]'))` [`r hdi(m2$'p.beta[2]')`], *pd* = `r round(length(which(m2$'p.beta[2]' > 0)) / (nrow(m2)-length(which(is.na(m2$'p.beta[2]'))))*100,1)`%, `r round((1-(length(which(m2$'p.beta[2]' > 0.09)) / (nrow(m2)-sum(is.na(m2$'p.beta[2]')))))*100,1)`% in ROPE, `r round(sum(na.omit(m2$'p.w[2]'))/nrow(m2)*100,1)`% inclusion) and interval rainfall (log odds change `r median(na.omit(m2$'p.beta[3]'))` [`r hdi(m2$'p.beta[3]')`], *pd* = `r round(length(which(m2$'p.beta[3]' > 0)) / (nrow(m2)-length(which(is.na(m2$'p.beta[3]'))))*100,1)`%, `r round((1-(length(which(m2$'p.beta[3]' > 0.09)) / (nrow(m2)-sum(is.na(m2$'p.beta[3]')))))*100,1)`% in ROPE, `r round(sum(na.omit(m2$'p.w[3]'))/nrow(m2)*100,1)`% inclusion) significantly increased recapture probability (Appendix S2: Table S2 and Figure S3b). *Bd* infection status positively correlated with recapture (log odds change `r median(na.omit(m2$'p.beta[6]'))` [`r hdi(m2$'p.beta[6]')`], *pd* = `r round(length(which(m2$'p.beta[6]' > 0)) / (nrow(m2)-length(which(is.na(m2$'p.beta[6]'))))*100,1)`%, `r round((1-(length(which(m2$'p.beta[6]' > 0.09)) / (nrow(m2)-sum(is.na(m2$'p.beta[6]')))))*100,1)`% in ROPE, `r round(sum(na.omit(m2$'p.w[6]'))/nrow(m2)*100,1)`% inclusion) (Appendix S2: Table S2 and Figure S3a), but infection intensity did not (log odds change `r median(na.omit(m2$'p.beta[7]'))` [`r hdi(m2$'p.beta[7]')`], *pd* = `r round(length(which(m2$'p.beta[7]' > 0)) / (nrow(m2)-length(which(is.na(m2$'p.beta[7]'))))*100,1)`%, `r round(sum(na.omit(m2$'p.w[7]'))/nrow(m2)*100,1)`% inclusion). Unexplained temporal variation was fairly high (SD of random survey effect on log odds `r median(m2$'p.sigma[1]')` [`r hdi(m2$'p.sigma[2]')`]) and there was substantial individual variation (SD on log odds `r median(m2$'p.sigma[2]')` [`r hdi(m2$'p.sigma[2]')`]).
+
+# Discussion
+
+Activity patterns of *M. fleayi*, described in our analysis by the recapture probability of marked animals, were significantly predicted by sex, individual body condition, temperature and rainfall, and *Bd* infection status. Females were much less likely to be recaptured than males, likely reflecting the observation that females spend considerable time away from streams and probably only visit them to breed. Increased individual body condition was strongly associated with recapture, which, to our knowledge, has not previously been reported in literature. Increased body condition may increase activity of frogs, or these individuals may claim stream-side territories, increasing recaptures along stream transects. As expected, temperature and rainfall were positively associated with recapture. Average rainfall over the preceding six weeks had a greater influence on activity than rainfall on the survey day, which did not correlate with detection. We found evidence that frogs infected with *Bd* were more likely to be recaptured than uninfected frogs, a result that has been found in some previous capture-recapture studies [@heard2014; @russell2019a] but not others [@murray2009; @briggs2010; @grogan2016; @muths2020]. Our results may be confounded with distance from the stream, where individuals residing closer to the water may be more likely to be infected with *Bd*, though studies relating infection patterns to stream distance are lacking. It is further possible that infected frogs are more active, as previous studies have found that *Bd* infection influences host life history traits, specifically mating behavior [e.g., @kelleher2021]. Increased detection of frogs would be expected if males were investing more energy into reproductive behavior when infected, especially given that a large proportion of detections were the result of calling. We did not investigate the effect of *Bd* infection on calling behavior, but future capture-recapture studies may record whether frogs were calling upon capture. Unlike @heard2014, we found no evidence of *Bd* infection intensity influencing recapture probability. This result suggests that increased recapture probability of infected individuals is not an effect of infection pathology, as behavioral effects of *Bd* infection would be expected to increase with infection intensity.
+
+\newpage
+
+# References

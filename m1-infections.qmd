@@ -1,0 +1,556 @@
+---
+title: "*Bd* infection prevalence and intensity analysis"
+author: |
+  | Matthijs Hollanders, Laura F. Grogan, Catherine J. Nock, Hamish I. McCallum, David A. Newell
+  | 
+  | Manuscript: Recovered frog populations coexist with endemic *Batrachochytrium dendrobatidis* despite intensity-dependent mortality
+  | Journal: Ecological Applications
+editor_options: 
+  chunk_output_type: console
+---
+
+# Load packages and setup
+
+```{r load packages}
+library(tidyverse)
+library(tidybayes)
+library(ggforce)
+library(ggtext)
+library(patchwork)
+library(nimble)
+library(MCMCvis)
+```
+
+# Data preparation
+
+```{r data preparation}
+# Load data
+community_raw <- read_csv("data/community.csv")
+
+# Data prep
+community <- 
+  community_raw %>%
+  mutate(
+    # Site factor with desired levels
+    site = factor(site, levels = c("Brindle Creek", "Tuntable Creek", "Bat Cave Creek")),
+    # Standardized temperature
+    temp_scaled  = (temp - mean(unique(temp), na.rm = T)) / (2 * sd(unique(temp), na.rm = T)),
+    # Standardized rain
+    rain_scaled = (rain - mean(unique(rain), na.rm = T)) / (2 * sd(unique(rain), na.rm = T)),
+    # Infection status
+    inf = ifelse(load > 0, 1, 0),
+    # Infection intensity
+    logload = ifelse(load > 0, log10(load), NA)) %>%
+  # Sample size per species and site
+  group_by(species, site) %>%
+  add_count(site, name = "n_species") %>%
+  # Sample size infected per species
+  group_by(species) %>%
+  mutate(n_inf = sum(inf)) %>%
+  # Remove species with < 10 infected
+  filter(n_inf >= 10) %>%
+  # Create factor with desired levels
+  mutate(species = factor(species, levels = c("L. pearsoniana", "L. wilcoxii", "M. iteratus", "M. fleayi")))
+
+
+# Compose data for NIMBLE model
+m1input <- 
+  community %>%
+  select(species, site, date, individual, temp_scaled, rain_scaled, inf, logload) %>%
+  compose_data()
+```
+
+# NIMBLE
+
+## Model code
+
+```{r NIMBLE model}
+# SITES
+# 1: Brindle Creek
+# 2: Tuntable Creek
+# 3: Bat Cave Creek
+
+# SPECIES
+# 1: Litoria pearsoniana
+# 2: Litoria wilcoxii
+# 3: Mixophyes iteratus
+# 4: Mixophyes fleayi
+
+# Code
+m1code <- nimbleCode({
+  
+  # PRIORS
+  
+  # Indicator variable inclusion probability and interaction constraints
+  psi ~ dbeta(1, 1)
+  constraint ~ dconstraint(Psi.w[1] >= Psi.w[3] & Psi.w[2] >= Psi.w[3] &
+                           N.w[1] >= N.w[3] & N.w[2] >= N.w[3])
+  
+  # Intercepts
+  for(k in 1:max(species)){
+    Psi.alpha[k] ~ dt(0, sigma = 5, df = 1)
+    N.alpha[k] ~ dt(0, sigma = 5, df = 1)
+  } # k
+  
+  # Coefficients
+  for(i in 1:3){
+    Psi.beta[i] ~ dt(0, sigma = 2.5, df = 1)
+    Psi.w[i] ~ dbern(psi)
+    N.beta[i] ~ dt(0, sigma = 2.5, df = 1)
+    N.w[i] ~ dbern(psi)
+  }
+  
+  # Random effect standard deviations
+  for(i in 1:3){
+    Psi.sigma[i] ~ T(dt(0, sigma = 2.5, df = 1), 0, )
+    N.sigma[i] ~ T(dt(0, sigma = 2.5, df = 1), 0, )
+  }
+  N.sigma[4] ~ T(dt(0, sigma = 2.5, df = 1), 0, )
+  
+  # Random site effects for L. pearsoniana, M. iteratus, and M. fleayi
+  for(m in 1:3){
+    Psi.eps.site[1,m] ~ dnorm(0, sd = Psi.sigma[1])
+    N.eps.site[1,m] ~ dnorm(0, sd = N.sigma[2])
+    Psi.eps.site[3,m] <- 0
+    N.eps.site[3,m] <- 0
+    Psi.eps.site[4,m] ~ dnorm(0, sd = Psi.sigma[1])
+    N.eps.site[4,m] ~ dnorm(0, sd = N.sigma[2])
+  }
+  
+  # Random site effects for L. wilcoxii
+  Psi.eps.site[2,1] <- 0
+  N.eps.site[2,1] <- 0
+  for(m in c(2:3)){
+    Psi.eps.site[2,m] ~ dnorm(0, sd = Psi.sigma[1])
+    N.eps.site[2,m] ~ dnorm(0, sd = N.sigma[2])
+  }
+  
+  # Random individual effects
+  for(i in 1:max(ind)){
+    Psi.eps.ind[i] ~ dnorm(0, sd = Psi.sigma[2])
+    N.eps.ind[i] ~ dnorm(0, sd = N.sigma[3])
+  }
+  
+  # Random temporal effects
+  for(t in 1:max(time)){
+    Psi.eps.time[t] ~ dnorm(0, sd = Psi.sigma[3])
+    N.eps.time[t] ~ dnorm(0, sd = N.sigma[4])
+  }
+ 
+  # LIKELIHOOD
+  
+  for(i in 1:n.ind){
+    # Infection prevalence
+    logit(Psi[i]) <-  Psi.alpha[species[i]] +
+                      Psi.w[1] * Psi.beta[1] * temp[i] +
+                      Psi.w[2] * Psi.beta[2] * rain[i] +
+                      Psi.w[3] * Psi.beta[3] * temp[i] * rain[i] +
+                      Psi.eps.site[species[i],site[i]] +
+                      Psi.eps.ind[ind[i]] +
+                      Psi.eps.time[time[i]]
+    y[i] ~ dbern(Psi[i]) 
+                      
+    # Infection intensity
+    N[i] <-  N.alpha[species[i]] +
+             N.w[1] * N.beta[1] * temp[i] +
+             N.w[2] * N.beta[2] * rain[i] +
+             N.w[3] * N.beta[3] * temp[i] * rain[i] +
+             N.eps.site[species[i],site[i]] +
+             N.eps.ind[ind[i]] +
+             N.eps.time[time[i]]
+    x[i] ~ dlnorm(meanlog = N[i] * y[i], sdlog = N.sigma[1])
+  } # i
+  
+  # DERIVED QUANTITIES
+  
+  # Mean infection prevalence and intensity
+  Psi.mean <- mean(Psi.alpha[1:max(species)])
+  N.mean <- mean(N.alpha[1:max(species)])
+  
+  # Infection prevalence and intensity per species and site
+  for(k in 1:max(species)){
+    for(m in 1:max(site)){
+      Psi.site[k,m] <- ilogit(Psi.alpha[k] + Psi.eps.site[k,m])
+      N.site[k,m] <- exp(N.alpha[k] + N.eps.site[k,m])
+    } # m
+  } # k
+  
+  # Infection prevalence species differences
+  Psi.diff[1] <- Psi.alpha[1] - Psi.alpha[2]  # L. pearsoniana - L.wilcoxii
+  Psi.diff[2] <- Psi.alpha[1] - Psi.alpha[3]  # L. pearsoniana - M. iteratus
+  Psi.diff[3] <- Psi.alpha[1] - Psi.alpha[4]  # L. pearsoniana - M. fleayi
+  Psi.diff[4] <- Psi.alpha[2] - Psi.alpha[3]  # L. wilcoxii - M. iteratus
+  Psi.diff[5] <- Psi.alpha[2] - Psi.alpha[4]  # L. wilcoxii - M. fleayi
+  Psi.diff[6] <- Psi.alpha[3] - Psi.alpha[4]  # M. iteratus - M. fleayi
+  
+  # Infection intensity species differences
+  N.diff[1] <- N.alpha[1] - N.alpha[2]  # L. pearsoniana - L.wilcoxii
+  N.diff[2] <- N.alpha[1] - N.alpha[3]  # L. pearsoniana - M. iteratus
+  N.diff[3] <- N.alpha[1] - N.alpha[4]  # L. pearsoniana - M. fleayi
+  N.diff[4] <- N.alpha[2] - N.alpha[3]  # L. wilcoxii - M. iteratus
+  N.diff[5] <- N.alpha[2] - N.alpha[4]  # L. wilcoxii - M. fleayi
+  N.diff[6] <- N.alpha[3] - N.alpha[4]  # M. iteratus - M. fleayi
+  
+  # POSTERIOR PREDICTIVE CHECKS
+  
+  for(i in 1:n.ind){
+    # Infection prevalence
+    y.pred[i] ~ dbern(Psi[i])
+    Psi.resid.data[i] <- (y[i] - Psi[i])^2 / Psi[i]
+    Psi.resid.pred[i] <- (y.pred[i] - Psi[i])^2 / Psi[i]
+    
+    # Infection intensity
+    x.pred[i] ~ dlnorm(meanlog = N[i] * y[i], sdlog = N.sigma[1])
+    N.resid.data[i] <- (x[i] - N[i] * y[i])^2 / N[i]
+    N.resid.pred[i] <- (x.pred[i] - N[i] * y[i])^2 / N[i]
+  }
+  
+  Psi.fit <- step(sum(Psi.resid.data[1:n.ind]) - sum(Psi.resid.pred[1:n.ind]))
+  N.fit <- step(sum(N.resid.data[1:n.ind]) - sum(N.resid.pred[1:n.ind]))
+  
+})
+```
+
+## Run model
+
+```{r}
+# Data
+str(m1data <- list(y = m1input$inf,
+                   x = m1input$logload,  
+                   constraint = 1))
+
+# Constants    
+str(m1consts <- list(n.ind = m1input$n,
+                     species = m1input$species,
+                     site = m1input$site,
+                     ind = m1input$individual,
+                     time = m1input$date,
+                     temp = m1input$temp_scaled,
+                     rain = m1input$rain_scaled))
+
+# Inits
+m1inits <- function() list(psi = 1, Psi.alpha = rnorm(4), Psi.beta = rnorm(3), Psi.sigma = runif(3),
+                           N.alpha = rnorm(4), N.beta = rnorm(3), N.sigma = runif(4))
+
+# Parameters to monitor
+m1mons <- c("Psi.alpha", "Psi.beta", "Psi.w", "Psi.sigma", "Psi.mean", "Psi.site", "Psi.diff", "Psi.fit",
+            "N.alpha", "N.beta", "N.w", "N.sigma", "N.mean", "N.site", "N.diff", "N.fit")
+
+# Model
+m1model <- nimbleModel(m1code, m1consts, m1data, m1inits())
+Cm1model <- compileNimble(m1model)
+
+# Configure and build MCMC and compile
+m1conf <- configureMCMC(m1model, monitors = m1mons)
+configureRJ(m1conf, targetNodes = c("Psi.beta", "N.beta"), indicatorNodes = c("Psi.w", "N.w"))
+m1conf
+m1mcmc <- buildMCMC(m1conf)
+Cm1mcmc <- compileNimble(m1mcmc, project = Cm1model, resetFunctions = T)
+
+# Run MCMC
+m1samples <- runMCMC(Cm1mcmc, nchains = 4, niter = 50000, nburnin = 5000, thin = 10)
+```
+
+## Save, summary, and traceplots
+
+```{r}
+# Save
+m1draws <- do.call(rbind, m1samples)
+write.csv(m1draws, "m1-draws.csv")
+
+# Summaries and traceplots
+m1summary <- MCMCsummary(m1samples, round = 3, HPD = T, func = median, params = m1mons)
+write.csv(m1summary, "m1-summary.csv")
+MCMCtrace(m1samples, pdf = T, Rhat = T, n.eff = T, ind = T, params = m1mons)
+
+# Pairwise comparisons
+par(mfrow = c(2, 1))
+MCMCplot(m1draws, params = "Psi.diff", HPD = T)
+MCMCplot(m1draws, params = "N.diff", HPD = T)
+```
+
+# Plots
+
+## Setup
+```{r}
+# Load data, if necessary
+m1draws <- read_csv("mcmc-samples/m1-draws.csv")
+m1summary <- read_csv("mcmc-samples/m1-summary.csv")
+n.pred <- 500
+
+# Theme
+theme_set(theme_classic(base_size = 9, 
+                        base_family = "Helvetica"))
+theme_update(axis.ticks = element_line(color = "#333333"),
+             axis.line = element_line(color = "#333333"),
+             axis.title = element_text(color = "#333333"),
+             axis.text = element_text(color = "#333333"),
+             legend.title = element_text(color = "#333333"),
+             legend.text = element_text(color = "#333333"),
+             legend.position = "none")
+
+# Load interval covariates
+covs.int <- read.csv("data/covs-int.csv", header = T)
+covs.int$temp.mean <- (covs.int$temp.max + covs.int$temp.min) / 2
+```
+
+## Plot 1: *Bd*  infection prevalence
+
+```{r plot Psi}
+# Sample size
+Psi_samples <- 
+  community %>%
+  arrange(site, species) %>%
+  distinct(n_species) %>%
+  pull()
+
+# Prepare tibble
+Psi_data <- 
+  m1summary[15:26,] %>%
+  mutate(site = factor(c(rep("Brindle Creek", 4), rep("Tuntable Creek", 4), rep("Bat Cave Creek", 4)),
+                       levels = c("Brindle Creek", "Tuntable Creek", "Bat Cave Creek")),
+         species = factor(rep(c("L. pearsoniana", "L. wilcoxii", "M. iteratus", "M. fleayi"), 3),
+                          levels = c("L. pearsoniana", "L. wilcoxii", "M. iteratus", "M. fleayi")))
+
+fig.Psi1 <- 
+    # Remove unobserved site/species combinations
+    Psi_data[-c(2, 3, 7),] %>%
+  add_column(
+    # Site/species sample size
+    sampleSize = Psi_samples,
+    # Significant species differences
+    sigGroup = c(NA, NA, "A", NA, "A", NA, "A", "B", NA)) %>%
+  ggplot(aes(x = species)) +
+  # Site-by-species estimates
+  geom_pointrange(aes(y = func, ymin = `95%_HPDL`, ymax = `95%_HPDU`, color = species == "M. fleayi", shape = site),
+                  size = 0.3,
+                  position = position_dodge(0.9)) +
+  # Highlight M. fleayi
+  scale_color_manual(values = c("#333333", "#5681ad"),
+                     guide = "legend") +
+  # Sample size
+  geom_text(aes(y = -Inf, label = sampleSize, group = site),
+            col = "#333333",
+            size = 2.2,
+            vjust = -1,
+            position = position_dodge(0.9)) +
+  # Species differences
+  geom_text(aes(x = species, y = `95%_HPDU`, label = sigGroup),
+            col = "#333333",
+            size = (9*0.8)*(5/14),
+            vjust = -1,
+            position = position_dodge(0),
+            na.rm = T) +
+  scale_y_continuous(breaks = seq(0.2, 1, 0.2),
+                     expand = c(0, 0),
+                     limits = c(0, 1.0029)) +
+  guides(color = "none",
+         shape = guide_legend(keyheight = 0.15, 
+                              keywidth = 0.15, 
+                              default.unit = "inch",
+                              override.aes = list(col = "#333333"))) +
+  theme(legend.position = c(0.03, 0.97),
+        legend.justification = c("left", "top"),
+        axis.text.x = element_text(face = "italic")) +
+  labs(x = "Species",
+       y = expression(paste(italic("Bd")," infection prevalence")),
+       shape = "Site")
+```
+
+## Plot 2:  *Bd*  infection intensity
+
+```{r plot N}
+# Sample size
+N_samples <- 
+  community %>%
+  filter(inf == 1) %>%
+  arrange(site, species) %>%
+  group_by(site, species) %>%
+  add_count(inf) %>%
+  distinct(n) %>%
+  pull()
+
+# N data
+N_data <- 
+  m1summary[49:60,] %>%
+  mutate(site = factor(c(rep("Brindle Creek", 4), rep("Tuntable Creek", 4), rep("Bat Cave Creek", 4)),
+                       levels = c("Brindle Creek", "Tuntable Creek", "Bat Cave Creek")),
+         species = factor(rep(c("L. pearsoniana", "L. wilcoxii", "M. iteratus", "M. fleayi"), 3),
+                          levels = c("L. pearsoniana", "L. wilcoxii", "M. iteratus", "M. fleayi")))
+
+# Plot
+fig.N1 <- 
+  # Remove unobserved site/species combinations
+  N_data[-c(2, 3, 7),] %>%
+  add_column(
+    # Site/species sample size
+    sampleSize = N_samples,
+    # Significant species differences
+    sigGroup = c("A", NA, NA, NA, "B", NA, "A", "A", NA)) %>%
+  ggplot(aes(x = species)) +
+  # Observed infection loads
+  geom_sina(aes(x = species, y = logload, shape = site),
+            data = community %>% filter(inf == 1),
+            position = position_dodge(0.9),
+            maxwidth = 2/3,
+            size = 0.4,
+            color = "grey50",
+            alpha = 0.4) +
+  # Site-by-species estimates
+  geom_pointrange(aes(y = func, ymin = `95%_HPDL`, ymax = `95%_HPDU`, color = species == "M. fleayi", shape = site),
+                  size = 0.3,
+                  position = position_dodge(0.9)) +
+  # Highlight M. fleayi
+  scale_color_manual(values = c("#333333", "#5681ad")) +
+  # Sample size
+  geom_text(aes(y = -Inf, label = sampleSize, group = site),
+            col = "#333333",
+            vjust = -1,
+            size = 2.2,
+            position = position_dodge(0.9)) +
+  # Species differences
+  geom_text(aes(x = species, y = `95%_HPDU`, label = sigGroup),
+            col = "#333333",
+            vjust = -1,
+            size = (9*0.8)*(5/14),
+            position = position_dodge(0),
+            na.rm = T) +
+  scale_y_continuous(breaks = seq(2, 6, 1),
+                     labels = function(x) {return(paste0("10^", x))},
+                     expand = c(0, 0),
+                     limits = c(1.5, 6.5)) +
+  theme(axis.text.x = element_text(face = "italic"),
+        axis.text.y = element_markdown()) +
+  labs(x = "Species",
+       y = expression(paste(italic("Bd")," infection intensity")))
+```
+
+## Plot 3: Prediction *Bd* infection prevalence as a function of temperature and rainfall
+
+```{r}
+temp.pred <- seq(9, 26, length.out = n.pred)
+temp.pred.scaled <- (temp.pred - mean(unique(community$temp))) / (2 * sd(unique(community$temp)))
+dry <- (0 - mean(unique(community$rain))) / (2 * sd(unique(community$rain)))
+wet <- (575 - mean(unique(community$rain))) / (2 * sd(unique(community$rain)))
+
+# Prediction curves temp and rain
+Psi.temp <- array(NA, c(n.pred, nrow(m1draws), 2))
+for(i in 1:n.pred){
+  # Temp when dry
+  Psi.temp[i,,1] <- plogis(m1draws$`Psi.alpha[4]` + # M. fleayi
+                             m1draws$`Psi.beta[1]` * temp.pred.scaled[i] +
+                             m1draws$`Psi.beta[2]` * dry)
+  
+  # Temp when wet
+  Psi.temp[i,,2] <- plogis(m1draws$`Psi.alpha[4]` + # M. fleayi
+                             m1draws$`Psi.beta[1]` * temp.pred.scaled[i] +
+                             m1draws$`Psi.beta[2]` * wet)
+}
+
+par(mfrow = c(2,1))
+hist(Psi.temp[,,2])
+
+hist(m1draws$`Psi.beta[2]`)
+
+# Plot 
+fig.Psi2 <- 
+  tibble(pred = c(Psi.temp), 
+         temp = rep(rep(temp.pred, nrow(m1draws)), 2),
+         group = factor(sort(rep(c("0", "1"), n.pred * nrow(m1draws))))) %>%
+  ggplot(aes(x = temp)) +
+  stat_lineribbon(aes(y = pred, fill = group),
+                  .width = 0.95,
+                  point_interval = median_hdci,
+                  size = 0,
+                  alpha = 0.5) +
+  stat_lineribbon(aes(y = pred, col = group),
+                  .width = 0,
+                  size = 2/3,
+                  alpha = 1) +
+  geom_rug(data = tibble(temp = covs.int$temp.mean),
+           col = "#333333",
+           alpha = 0.5,
+           size = 0.2,
+           length = unit(0.05, "npc")) +
+  scale_color_manual(values = c("#d73027", "#3E69A2"),
+                     labels = c("Dry", "Wet"),
+                     guide = guide_legend(title = "Rainfall",
+                                          keyheight = 0.15, 
+                                          keywidth = 0.15,
+                                          default.unit = "inch",
+                                          override.aes = list(fill = NA))) +
+  scale_fill_manual(values = c("#d73027", "#3E69A2"),
+                    guide = "none") +
+  scale_x_continuous(breaks = seq(10, 25, 5),
+                     expand = c(0, 0),
+                     limits = c(9, 26)) +
+  scale_y_continuous(breaks = seq(0.2, 1, 0.2),
+                     expand = c(0, 0),
+                     limits = c(0, 1.0029)) +
+  theme(legend.position = c(0.97, 0.97),
+        legend.justification = c("right", "top")) +
+  labs(x = "Daily temperature (ºC)",
+       y = expression(paste(italic("Bd")," infection prevalence")))
+```
+
+## Plot 4: Prediction *Bd* infection intensity as a function of temperature and rainfall
+
+```{r}
+# Prediction curves temp and rain
+N.temp <- array(NA, c(n.pred, nrow(m1draws), 2))
+for(i in 1:n.pred){
+  # Temp when dry
+  N.temp[i,,1] <- exp(m1draws$`N.alpha[4]` + # M. fleayi 
+                        m1draws$`N.beta[1]` * temp.pred.scaled[i] +
+                        m1draws$`N.beta[2]` * dry)
+  # Temp when dry
+  N.temp[i,,2] <- exp(m1draws$`N.alpha[4]` + # M. fleayi
+                        m1draws$`N.beta[1]` * temp.pred.scaled[i] +
+                        m1draws$`N.beta[2]` * wet)
+}
+
+# Plot 
+fig.N2 <- 
+  tibble(pred = c(N.temp), 
+         temp = rep(rep(temp.pred, nrow(m1draws)), 2),
+         group = sort(rep(c("0", "1"), n.pred * nrow(m1draws)))) %>%
+  ggplot(aes(x = temp)) +
+  stat_lineribbon(aes(y = pred, fill = group),
+                  .width = 0.95,
+                  point_interval = median_hdci,
+                  size = 0,
+                  alpha = 0.5) +
+  stat_lineribbon(aes(y = pred, col = group),
+                  .width = 0,
+                  size = 2/3,
+                  alpha = 1) +
+  geom_rug(data = tibble(temp = covs.int$temp.mean),
+           col = "#333333",
+           alpha = 0.5,
+           size = 0.2,
+           length = unit(0.05, "npc")) +
+  scale_color_manual(values = c("#d73027", "#3E69A2"),
+                    labels = c("Dry", "Wet")) +
+  scale_fill_manual(values = c("#d73027", "#3E69A2")) +
+  scale_x_continuous(breaks = seq(10, 25, 5),
+                     expand = c(0, 0),
+                     limits = c(9, 26)) +
+  scale_y_continuous(breaks = seq(2, 6, 1),
+                     labels = function(x) {return(paste0("10^", x))},
+                     expand = c(0, 0),
+                     limits = c(1.5, 6.5)) +
+  theme(axis.text.y = element_markdown()) +
+  labs(x = "Daily temperature (ºC)",
+       y = expression(paste(italic("Bd")," infection intensity")))
+```
+
+## Create final plot
+
+```{r plot final}
+fig.m1 <- (fig.Psi1 | fig.N1) / (fig.Psi2 | fig.N2) +
+  plot_annotation(tag_levels = "a") &
+  theme(plot.tag = element_text(face = "bold", color = "#333333"))
+  
+ggsave("figs/fig-m1.jpg", fig.m1, height = 5, width = 6, units = "in", dpi = 600)
+```
+

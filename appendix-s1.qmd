@@ -1,0 +1,576 @@
+---
+title: "Appendix S1: Supplementary methods"
+author: |
+  | Matthijs Hollanders, Laura F. Grogan, Catherine J. Nock, Hamish I. McCallum, David A. Newell
+  | 
+  | Manuscript: Recovered frog populations coexist with endemic *Batrachochytrium dendrobatidis* despite intensity-dependent mortality
+  | Journal: Ecological Applications
+format:
+  pdf:
+    toc: true
+    header-includes: |
+      \usepackage{titling}
+      \pretitle{\begin{flushleft}\Large\bfseries}
+      \posttitle{\end{flushleft}}  
+      \preauthor{\begin{flushleft}\large}
+      \postauthor{\end{flushleft}}  
+      \predate{\begin{flushleft}\large}
+      \postdate{\end{flushleft}}
+      \usepackage{blkarray}
+      \usepackage{multirow}
+      \usepackage{float}
+      \floatplacement{figure}{H} 
+      \usepackage[bf]{caption}
+      \newcommand{\beginsupplement}{
+        \setcounter{table}{0}  
+        \renewcommand{\thetable}{S\arabic{table}} 
+        \setcounter{figure}{0} 
+        \renewcommand{\thefigure}{S\arabic{figure}}}
+execute:
+  eval: false
+  echo: true
+fontsize: 11pt
+bibliography: chapter1.bib
+csl: ecological-applications.csl
+nocite: |
+  @wickham2016
+geometry: margin = 1in
+---
+
+\newpage
+
+# Laboratory protocol to detect and quantify *Bd* infections
+
+DNA was extracted from swab tips with Prepman^®^ Ultra (Applied Biosystems) using a standard protocol [@boyle2004; @hyatt2007] without bead-beating step [@brannelly2020]. Swab tips were cut off using scissors into 1.5 ml tubes containing 70 $\mu$l Prepman^®^ Ultra. In order to avoid contamination, all tubes remained closed until respective swab tips were cut and scissors were cleaned with freshly made 2% bleach solution and rinsed with Milli-Q water between each sample. A negative control swab was included with every run of extractions to test for contamination, of which we observed no evidence. After cutting swab tips, tubes were briefly vortexed to ensure mixing with Prepman^®^ Ultra and incubated at 100ºC for 10 min in an oven. Samples were allowed to cool for 2 min and centrifuged for 3 min at 13,000 rpm. Supernatant was recovered and 5 $\mu$l was diluted 10^-1^ with UltraPure Distilled Water (Invitrogen) for diagnosis using quantitative Polymerase Chain Reaction (qPCR).
+
+We used a Rotor-Gene Q (Qiagen) to amplify and quantify *Bd* ITS copies for 40 cycles following modified standard protocols [@boyle2004]. We used Rotor-Discs with 100 wells and 15 $\mu$l reaction volumes containing 7.5 $\mu$l (1X) Sensi-FAST^TM^ Probe Lo-ROX Mix (Bioline), 900 nM primers (ITS1-3 5'-CCTTGATATAATACAGTGTGCCATATGTC-3' and 5.8S 5'-AGCCAAGAGATCCGTTGTCAAA-3'; Sigma-Aldrich), 250 nM TaqMan^TM^ ChytrMGB2 probe (6-FAM-CGAGTCGAACAAAAT-MGB-NFQ; ThermoFisher), 400 ng/$\mu$l UltraPure^TM^ BSA (Invitrogen), Taqman^TM^ Exogenous Internal Positive Controls (with 1.5 $\mu$l 10X Mix and 0.3 $\mu$l 50X DNA), and 5 $\mu$l template. Included in each run were five reactions containing gBlocks^®^ synthetic ITS standards (Integrated DNA Technologies) increasing by orders of magnitude from 10^1--5^ copies, from which a standard curve was generated to quantify ITS copies in each well. Runs included three no template controls (NTCs, to test for contamination) with UltraPure^TM^ Distilled Water instead of template.
+
+Swab samples were run in duplicate and considered positive when at least one well amplified more than 0 ITS copies. Our assay consistently recovered small *Bd* loads which likely represent low infection levels [@hyatt2007; @briggs2010]. We report infection intensity as log~10~ ITS copies per swab because the ITS copy number of local *Bd* strains is unknown [@longo2013]. To generate ITS copies per swab, estimated numbers of ITS copies per well were averaged over the duplicate runs and multiplied by the dilution factors in the extraction process.
+
+\newpage
+
+# Capture-recapture modeling
+
+We fit a robust design, multisite, multistate Cormack-Jolly-Seber [@cormack1964; @jolly1965; @seber1965; @kery2012b] using a continuous-time formulation of the ecological process [@miller2008; @conn2012; @glennie2022]. Our robust design consisted of 19--21 primary occasions per site with 2--3 secondary surveys per primary occasion per site. We modeled the ecological process with hazard rates and matrix exponentials to account for unequal time intervals during the first two years of the study, and because this method is more appropriate for modeling processes occurring instantaneously in continuous-time [@ergon2018]. We specified six-weeks as the baseline interval between primary occasions---note that this implicitly assumes that infection state transitions were not expected to occur more than once over six-weekly time periods. We conducted our analysis with NIMBLE 0.12.2 [@devalpine2017] in R 4.1.0 [@rcoreteam2021].
+
+## Ecological process
+
+We modeled three latent ecological states ($z$): (1) alive and *Bd*--, (2) alive and *Bd*+, and (3) dead. Starting after an individual's first capture, the latent ecological state of individual $i$ during primary occasion $t$ at site $m$ was modeled conditional on the ecological state during primary occasion $t-1$:
+
+```{=tex}
+\begin{equation}
+  z_{i,t,m}|z_{i,t-1,m} \sim \operatorname{Categorical}(\mathbf{TPM.z})
+\end{equation}
+```
+where the transition *probability* matrix (TPM) of the ecological process $\mathbf{TPM.z} = e^{\mathbf{TRM.z}\tau}$, where $\tau$ is the vector of site-specific primary occasion intervals in units of six-weeks and $\mathbf{TRM.z}$ is the transition *rate* matrix (TRM) of the ecological process [@miller2008; @conn2012]:
+
+```{=tex}
+\begin{center}
+  \begin{blockarray}{r r *{3}{c} l}
+    & & \BAmulticolumn{3}{c}{$z_{i,t,m}$} & \\
+    & & Alive, \textit{Bd}-- & Alive, \textit{Bd}+ & Dead & \\
+    \begin{block}{r r [*{3}{c}] l}
+      \multirow{3}{*}{$z_{i,t-1,m}$} & Alive, \textit{Bd}-- & $-(\psi_{12} + \phi_1)$ & $\psi_{12}$ & $\phi_1$ & \\
+      & Alive, \textit{Bd}+ & $\psi_{21}$ & $-(\psii_{21} + \phi_2)$ & $\phi_2$ & \\
+      & Dead & $0$ & $0$ & $0$ & $_{i,t,m}$ \\
+  \end{blockarray}
+\end{center}
+```
+Above, $\phi_1$ is the mortality hazard rate of uninfected individuals, $\phi_2$ is the mortality hazard rate of infected individuals, $\psi_{12}$ is the hazard rate of gaining *Bd* infection, and $\psi_{21}$ is the hazard rate of clearing *Bd* infection. We calculated $e^\mathbf{TRM.z} = \mathbf{V}e^{\mathbf{D}\tau}\mathbf{V^{-1}}$, where $\mathbf{V}$ is the matrix of eigenvectors of $\mathbf{TRM.z}$ and $\mathbf{D}$ is the diagonal matrix of eigenvalues of $\mathbf{TRM.z}$ [@miller2008; @conn2012]. Note that when using NIMBLE, one can use `nimbleRcall` to call the `expm::expm()` function within the model code [@goulet2021], but this approach is approximately 10 times slower than using NIMBLE's built-in matrix functions (see *Model code* below).
+
+All hazard rates were modeled at the level of site-specific primary occasions. We modeled mortality hazard rates as log-linear functions of body condition [scaled mass index, @peig2009], average daily temperature over the primary interval (a proxy for season), *Bd* infection status ($\phi_2$ only), *Bd* infection intensity ($\phi_2$ only), and all pairwise interactions. After standardizing predictors, including *Bd* infection intensity, the effect of *Bd* infection status can be interpreted as the effect of being infected with *Bd* with an average infection intensity on the log mortality hazard rate. Hazard rates of infection transitions were modeled as log-linear functions of body condition, average daily temperature over the primary interval, average six-weekly rainfall over the primary interval, their interaction, and *Bd* infection intensity ($\psi_{21}$ only). All mortality and infection transition parameters additionally included random site and survey effects, which were drawn from two multivariate normal distributions, respectively. Note that the mortality hazard rates are 'apparent' mortality hazard rates, as mortality could not be disentangled from permanent emigration from the sites.
+
+## Observation process
+
+The observation process was modeled conditional on the latent ecological state, with three possible observed states ($y$, data): (1) seen/recaptured and *Bd*--, (2) seen/recaptured and *Bd*+, and (3) not seen/recaptured. Note that the observed state was assigned based on the collected swab samples. The observed state of individual $i$, primary occasion $t$, secondary survey $k$, at site $m$ was drawn from a categorical distribution conditional on the latent ecological state:
+
+```{=tex}
+\begin{equation}
+  y_{i,t,k,m}|z_{i,t,m} \sim \operatorname{Categorical}(\mathbf{TPM.o})
+\end{equation}
+```
+Where the TPM of the observation process ($\mathbf{TPM.o}$) was:
+
+```{=tex}
+\begin{center}
+  \begin{blockarray}{r r *{3}{c} l}
+    & & \BAmulticolumn{3}{c}{$y_{i,t,k,m}$} & \\
+    & & Seen, \textit{Bd}-- & Seen, \textit{Bd}+ & Not seen & \\
+    \begin{block}{r r [*{3}{c}] l}
+      \multirow{3}{*}{$z_{i,t,m}$} & Alive, \textit{Bd}-- & $p_1$ & $0$ & $1 - p_1$ & \\
+      & Alive, \textit{Bd}+ & $0$ & $p_2$ & $1 - p_2$ & \\
+      & Dead & $0$ & $0$ & $1$ & $_{i,t,k,m}$ \\
+  \end{blockarray}
+\end{center}
+```
+where $p_1$ and $p_2$ are the recapture probabilities of individuals uninfected and infected with *Bd*, respectively. We modeled recapture probabilities at the level of secondary surveys as logit-linear functions of body condition, sex, daily temperature on the survey day, cumulative rainfall over the primary interval, their interaction, and *Bd* infection status and intensity ($p_2$ only). We additionally included random site effects, random secondary-survey level effects, and random individual effects. We included the individual effects to account for heterogeneity due to differences in individual home ranges, transience, and position on the transect.
+
+## Priors
+
+For hazard rates, we used $\operatorname{Exponential}(1)$ for the log intercepts of log-linear functions because this corresponds to a uniform distribution on the baseline hazard rates transformed to probabilities. For recapture probabilities, we used $\operatorname{Beta}(1, 1)$ for the logit intercept because this is a uniform distribution on the baseline recapture probabilities. We used weakly informative $\operatorname{(Half-)Cauchy}(0, 2.5)$ on all predictor variables and standard deviations of random effects [@gelman2008].
+
+## Reversible Jump MCMC
+
+For predictor variable selection, we used NIMBLE's built-in reversible jump MCMC [RJMCMC, @green1995]. RJMCMC samples across models with different dimensionalities (e.g., more or fewer predictors), and readily facilitates model selection directly within the MCMC algorithms. When RJMCMC includes a predictor in the model, the coefficients are estimated; when RJMCMC excludes a predictor, the coefficient is toggled to 0. After running the MCMC, the inclusion probability of predictors can be retrieved by calculating the proportion of MCMC samples for which a predictor was included in the model. Important predictors will be included in nearly all iterations, and predictors with little predictive potential will be excluded. We constrained interaction effects to only be included in the presence of main effects to maintain the principle of marginality.
+
+## Imputation of missing values
+
+NIMBLE does not allow missing values in predictor variables. Therefore, for predictors with missing values, in particular matrices of time-varying individual covariates, missing values need to be provided. Bayesian analysis readily facilitates the imputation of these missing values using submodels for the covariates [@gelman2013b]. We imputed missing values in three predictor variables: body condition, infection intensity, and sex. For body condition, we imputed missing values from a normal distribution of the observed body condition values with random individual effects to account for repeat measures over the study. For infection intensity, we similarly imputed missing values from a normal distribution with random individual effects, but also included temperature, rainfall, and their interaction to account for seasonal differences in infection intensity. For sex, we imputed 15 missing values from a Bernoulli distribution roughly centered on the observed sex ratio.
+
+## Posterior predictive checks
+
+We assessed goodness-of-fit through posterior predictive checks [PPCs, @gelman1996] inspired by @rankin2016 and @kery2020. PPCs are conducted by simulating replicate datasets ($y^\text{rep}$) from the joint posterior distribution for each MCMC iteration, calculating some summary statistics for the observed and replicate datasets, and then comparing some discrepancy statistics between observed and replicated datasets. By comparing the discrepancy statistics from the data ($D$) with the discrepancy statistics from the replicate datasets ($D^\text{rep}$), we assess to what extent our model predicts capture histories that are consistent with our observed data. Bayesian *p*-values summarize the similarities between observed and replicated data, calculated as $\operatorname{Pr}(D^\text{rep} > D)$, where values around 0.5 imply good fit. Note that our PPCs exclude the primary occasion of first capture, because this occasion is not modeled and thus not simulated in the replicate datasets.
+
+For the first PPC, we counted the number of observed infection state transitions (going from uninfected to infected and vice versa) for each individual in the study. Note that infection state transitions can only be observed if individuals are observed during consecutive primaries in different states. We then calculated Freeman-Tukey statistics on these observed state transitions to calculate a Bayesian *p*-value. This PPC was conducted to assess the fit of the ecological process.
+
+For the second PPC, we counted the number of times each individual was observed as either uninfected or infected with *Bd* during a secondary survey. Our summary statistics were thus the total number of recaptures of each individual for each alive state. We computed Freeman-Tukey statistics and calculated Bayesian *p*-values. This PPC was conducted to assess the fit of the observation process.
+
+## Model code
+
+Below is the model code for NIMBLE, including imputation of missing values in predictors, derived quantities, and PPCs. Note that we use non-centered parameterization for all random effects to improve MCMC mixing [@papaspiliopoulos2003].
+
+\small
+
+```{r}
+code <- nimbleCode({
+
+  # PRIORS
+  
+  # Indicator variable inclusion probability and interaction constraints
+  psi ~ dbeta(1, 1)
+  constraint ~ dconstraint(phi.w[1] >= phi.w[3] & phi.w[2] >= phi.w[3] &
+                           phi.w[1] >= phi.w[6] & phi.w[5] >= phi.w[6] &
+                           phi.w[2] >= phi.w[7] & phi.w[5] >= phi.w[7] &
+                           psi12.w[1] >= psi12.w[3] & psi12.w[2] >= psi12.w[3] &
+                           psi21.w[1] >= psi21.w[3] & psi21.w[2] >= psi21.w[3] &
+                           p.w[2] >= p.w[4] & p.w[3] >= p.w[4] &
+                           load.w[1] >= load.w[3] & load.w[2] >= load.w[3])
+  
+  # Survival (phi)
+  phi.alpha ~ dexp(1)
+  for(i in 1:7){
+    phi.beta[i] ~ dt(0, sigma = 2.5, df = 1)
+    phi.w[i] ~ dbern(psi)
+  }
+  
+  # Gaining infection (psi12)
+  psi12.alpha ~ dexp(1)
+  for(i in 1:4){
+    psi12.beta[i] ~ dt(0, sigma = 2.5, df = 1)
+    psi12.w[i] ~ dbern(psi)
+  }
+  
+  # Clearing infection (psi21)
+  psi21.alpha ~ dexp(1)
+  for(i in 1:5){
+    psi21.beta[i] ~ dt(0, sigma = 2.5, df = 1)
+    psi21.w[i] ~ dbern(psi)
+  }
+  
+  # Recapture (p)
+  p.alpha ~ dbeta(1, 1)
+  for(i in 1:7){
+    p.beta[i] ~ dt(0, sigma = 2.5, df = 1)
+    p.w[i] ~ dbern(psi)
+  }
+  for(i in 1:2){
+    p.sigma[i] ~ T(dt(0, sigma = 2.5, df = 1), 0, )
+  }
+  
+  # Correlated random site effects (see NIMBLE manual section 5.2.4.1.2)
+  for(i in 1:4){
+    sigma.site[i] ~ T(dt(0, sigma = 2.5, df = 1), 0, )
+  }
+  # Prior on Cholesky factor
+  chol.site[1:4,1:4] ~ dlkj_corr_cholesky(1.5, 4)
+  # Correlation matrix
+  cor.site[1:4,1:4] <- t(chol.site[1:4,1:4]) %*% chol.site[1:4,1:4]
+  
+  # Correlated random survey effects
+  for(i in 1:3){
+    sigma.survey[i] ~ T(dt(0, sigma = 2.5, df = 1), 0, )
+  }
+  chol.survey[1:3,1:3] ~ dlkj_corr_cholesky(1.5, 3)
+  cor.survey[1:3,1:3] <- t(chol.survey[1:3,1:3]) %*% chol.survey[1:3,1:3]
+  
+  # IMPUTATION
+  
+  # Scaled mass index (body condition)
+  SMI.alpha <- 0  # Centered predictor
+  for(i in 1:2){
+    SMI.sigma[i] ~ T(dt(0, sigma = 2.5, df = 1), 0, )
+  }
+  
+  # Infection intensity
+  load.alpha <- 0  # Centered predictor
+  for(i in 1:3){
+    load.beta[i] ~ dt(0, sigma = 2.5, df = 1)
+    load.w[i] ~ dbern(psi)
+  }
+  for(i in 1:2){
+    load.sigma[i] ~ T(dt(0, sigma = 2.5, df = 1), 0, )
+  }
+  
+  # Sex
+  sex.mu ~ dbeta(17, 3)  # Centered on observed sex ratio
+  
+  # RANDOM EFFECTS
+ 
+  for(m in 1:n.site){
+    
+    # Site effects (non-centered, multivariate)
+    eps.site[1:4,m] <- diag(sigma.site[1:4]) %*% 
+                       t(chol.site[1:4,1:4]) %*% 
+                       z.site[1:4,m]
+    for(j in 1:4){
+      z.site[j,m] ~ dnorm(0, 1)  # z-scores
+    }
+
+    for(t in 1:(n.prim - 1)){
+
+      # Survey effects (non-centered, multivariate)      
+      eps.survey[1:3,t,m] <- diag(sigma.survey[1:3]) %*% 
+                             t(chol.survey[1:3,1:3]) %*% 
+                             z.survey[1:3,t,m]
+      for(j in 1:3){
+        z.survey[j,t,m] ~ dnorm(0, 1)  # z-scores
+      } # j
+      
+      # Survey effects (non-centered, recapture)
+      for(j in 1:n.sec[t+1,m]){
+        p.eps.survey[t,j,m] <- z.survey.p[t,j,m] * p.sigma[1]
+        z.survey.p[t,j,m] ~ dnorm(0, 1)
+      } # j
+      
+    } # t
+    
+    # Individual effects (non-centered)
+    for(i in 1:n.ind[m]){
+      
+      p.eps.ind[i,m] <- z.ind[1,i,m] * p.sigma[2]
+      SMI.eps.ind[i,m] <- z.ind[2,i,m] * SMI.sigma[2]
+      load.eps.ind[i,m] <- z.ind[3,i,m] * load.sigma[2]
+      for(j in 1:3){
+        z.ind[j,i,m] ~ dnorm(0, 1)  # z-scores
+      } # j
+
+      # PARAMETERS
+
+      for(t in first[i,m]:(n.prim - 1)){
+        
+        # Mortality hazard rate of uninfected individuals (log)
+        log(phi1[i,t,m]) <- log(phi.alpha) +
+                            phi.w[1] * phi.beta[1] * SMI[i,t,m] +
+                            phi.w[2] * phi.beta[2] * temp.int[t+1,m] +
+                            phi.w[3] * phi.beta[3] * SMI[i,t,m] * temp.int[t+1,m] +
+                            eps.site[1,m] +
+                            eps.survey[1,t,m]
+        
+        # Mortality hazard rate of infected individuals (log)
+        log(phi2[i,t,m]) <- log(phi1[i,t,m]) +
+                            phi.w[4] * phi.beta[4] +
+                            phi.w[5] * phi.beta[5] * load[i,t,m] +
+                            phi.w[6] * phi.beta[6] * SMI[i,t,m] * load[i,t,m] +
+                            phi.w[7] * phi.beta[7] * temp.int[t+1,m] * load[i,t,m]
+        
+        # Hazard rate of gaining infection (log)
+        log(psi12[i,t,m]) <- log(psi12.alpha) +
+                             psi12.w[1] * psi12.beta[1] * temp.int[t+1,m] +
+                             psi12.w[2] * psi12.beta[2] * rain.int[t+1,m] +
+                             psi12.w[3] * psi12.beta[3] * temp.int[t+1,m] * rain.int[t+1,m] +
+                             psi12.w[4] * psi12.beta[4] * SMI[i,t,m] +
+                             eps.site[2,m] +
+                             eps.survey[2,t,m]
+        
+        # Hazard rate of clearing infection (log)
+        log(psi21[i,t,m]) <- log(psi21.alpha) +
+                             psi21.w[1] * psi21.beta[1] * temp.int[t+1,m] +
+                             psi21.w[2] * psi21.beta[2] * rain.int[t+1,m] +
+                             psi21.w[3] * psi21.beta[3] * temp.int[t+1,m] * rain.int[t+1,m] +
+                             psi21.w[4] * psi21.beta[4] * SMI[i,t,m] +
+                             psi21.w[5] * psi21.beta[5] * load[i,t,m] +
+                             eps.site[3,m] +
+                             eps.survey[3,t,m]
+        
+        for(j in 1:n.sec[t+1,m]){
+          
+          # Recapture of uninfected individuals (logit)
+          logit(p1[i,t,j,m]) <- logit(p.alpha) +
+                                p.w[1] * p.beta[1] * sex[i,m] + 
+                                p.w[2] * p.beta[2] * temp.surv[t,j,m] +
+                                p.w[3] * p.beta[3] * rain.int[t+1,m] +
+                                p.w[4] * p.beta[4] * temp.surv[t,j,m] * rain.int[t+1,m] +
+                                p.w[5] * p.beta[5] * SMI[i,t+1,m] +
+                                eps.site[4,m] +
+                                p.eps.survey[t,j,m] +
+                                p.eps.ind[i,m]
+          
+          # Recapture of infected individuals (logit)
+          logit(p2[i,t,j,m]) <- logit(p1[i,t,j,m]) + 
+                                p.w[6] * p.beta[6] +
+                                p.w[7] * p.beta[7] * load[i,t+1,m]
+          
+        } # j
+        
+        # ECOLOGICAL PROCESS
+
+        # Transition rate matrix (TRM)
+        
+        # Alive, Bd-
+        TRM.z[1,1,i,t,m] <- -(psi12[i,t,m] + phi1[i,t,m])  # Remains Bd-
+        TRM.z[1,2,i,t,m] <- psi12[i,t,m]                   # Becomes Bd+
+        TRM.z[1,3,i,t,m] <- phi1[i,t,m]                    # Dies
+        
+        # Alive, Bd+
+        TRM.z[2,1,i,t,m] <- psi21[i,t,m]                   # Becomes Bd-
+        TRM.z[2,2,i,t,m] <- -(psi21[i,t,m] + phi2[i,t,m])  # Remains Bd+ 
+        TRM.z[2,3,i,t,m] <- phi2[i,t,m]                    # Dies
+        
+        # Dead
+        TRM.z[3,1,i,t,m] <- 0                              # Becomes Bd-
+        TRM.z[3,2,i,t,m] <- 0                              # Becomes Bd+
+        TRM.z[3,3,i,t,m] <- 0                              # Dies
+        
+        # Matrix of eigenvectors of TRM.z
+        V[1:3,1:3,i,t,m] <- eigen(TRM.z[1:3,1:3,i,t,m])$vectors
+        
+        # Diagonal matrix of eigenvalues of TRM.z
+        D[1:3,1:3,i,t,m] <- diag(eigen(TRM.z[1:3,1:3,i,t,m])$values)
+        
+        # Exponential of D multiplied by primary survey intervals
+        expDtau[1,1,i,t,m] <- exp(D[1,1,i,t,m] * tau[t,m])
+        expDtau[1,2,i,t,m] <- 0
+        expDtau[1,3,i,t,m] <- 0
+        expDtau[2,1,i,t,m] <- 0
+        expDtau[2,2,i,t,m] <- exp(D[2,2,i,t,m] * tau[t,m])
+        expDtau[2,3,i,t,m] <- 0
+        expDtau[3,1,i,t,m] <- 0
+        expDtau[3,2,i,t,m] <- 0
+        expDtau[3,3,i,t,m] <- exp(D[3,3,i,t,m] * tau[t,m])
+        
+        # Transition probability matrix
+        TPM.z[1:3,1:3,i,t,m] <- V[1:3,1:3,i,t,m] %*% 
+                                expDtau[1:3,1:3,i,t,m] %*% 
+                                inverse(V[1:3,1:3,i,t,m])
+        
+        # OBSERVATION PROCESS (TPM)
+        
+        for(j in 1:n.sec[t+1,m]){
+          
+          # Alive, Bd-
+          TPM.o[1,1,i,t,j,m] <- p1[i,t,j,m]                   # Seen, Bd-
+          TPM.o[1,2,i,t,j,m] <- 0                             # Seen, Bd+
+          TPM.o[1,3,i,t,j,m] <- 1 - p1[i,t,j,m]               # Not seen
+          
+          # Alive, Bd+
+          TPM.o[2,1,i,t,j,m] <- 0                             # Seen, Bd-
+          TPM.o[2,2,i,t,j,m] <- p2[i,t,j,m]                   # Seen, Bd+
+          TPM.o[2,3,i,t,j,m] <- 1 - p2[i,t,j,m]               # Not seen
+          
+          # Dead
+          TPM.o[3,1,i,t,j,m] <- 0                             # Seen, Bd-
+          TPM.o[3,2,i,t,j,m] <- 0                             # Seen, Bd+
+          TPM.o[3,3,i,t,j,m] <- 1                             # Not seen
+          
+        } # j
+      } # t
+      
+      # LIKELIHOOD        
+      
+      # Ecological state at first occasion (provided as constants)
+      z[i,first[i,m],m] <- z.first[i,first[i,m],m]
+      
+      for(t in (first[i,m] + 1):n.prim){
+        
+        # Ecological process
+        z[i,t,m] ~ dcat(TPM.z[z[i,t-1,m],1:3,i,t-1,m])    
+        
+        for(j in 1:n.sec[t,m]){
+          
+          # Observation process
+          y[i,t,j,m] ~ dcat(TPM.o[z[i,t,m],1:3,i,t-1,j,m])
+          yrep[i,t,j,m] ~ dcat(TPM.o[z[i,t,m],1:3,i,t-1,j,m])
+          
+        } # j
+      } # t
+      
+      # IMPUTATION
+      
+      # Scaled mass index
+      SMI.mu[i,m] <- SMI.alpha + 
+                     SMI.eps.ind[i,m]
+      
+      for(t in first[i,m]:n.prim){
+        
+        SMI[i,t,m] ~ dnorm(SMI.mu[i,m], SMI.sigma[1])
+        
+        # Infection intensity
+        load.mu[i,t,m] <- load.alpha +
+                          load.w[1] * load.beta[1] * temp.int[t,m] +
+                          load.w[2] * load.beta[2] * rain.int[t,m] +
+                          load.w[3] * load.beta[3] * temp.int[t,m] * rain.int[t,m] +
+                          load.eps.ind[i,m]
+        load[i,t,m] ~ dnorm(load.mu[i,t,m], load.sigma[1])
+        
+      } # t
+      
+      # Sex
+      sex[i,m] ~ dbern(sex.mu)
+      
+    } # i
+    
+    # DERIVED PARAMETERS
+    
+    # Site-level intercepts
+    phi.alpha.site[m] <- exp(log(phi.alpha) + eps.site[1,m])
+    psi12.alpha.site[m] <- exp(log(psi12.alpha) + eps.site[2,m])
+    psi21.alpha.site[m] <- exp(log(psi21.alpha) + eps.site[3,m])
+    p.alpha.site[m] <- expit(logit(p.alpha) + eps.site[4,m])
+    
+    for(t in 1:(n.prim - 1)){
+      
+      # Mean mortality hazard rates per primary occasion per site
+      mean.phi[t,m] <- exp(log(phi.alpha) + 
+                           phi.beta[2] * temp.int[t+1,m] +
+                           eps.site[1,m] +
+                           eps.survey[1,t,m])
+      
+      # Mean hazard rates of gaining infection per primary occasion per site
+      mean.psi12[t,m] <- exp(log(psi12.alpha) + 
+                             psi12.beta[1] * temp.int[t+1,m] +
+                             psi12.beta[2] * rain.int[t+1,m] +
+                             psi12.beta[3] * temp.int[t+1,m] * rain.int[t+1,m] + 
+                             eps.site[2,m] +
+                             eps.survey[2,t,m])
+      
+      # Mean hazard rates of gaining infection per primary occasion per site
+      mean.psi21[t,m] <- exp(log(psi21.alpha) +
+                             psi21.beta[1] * temp.int[t+1,m] +
+                             psi21.beta[2] * rain.int[t+1,m] +
+                             psi21.beta[3] * temp.int[t+1,m] * rain.int[t+1,m] +
+                             eps.site[3,m] +
+                             eps.survey[3,t,m])
+      
+      # Mean recapture probabilities per primary occasion per site
+      mean.p[t,m] <- expit(logit(p.alpha) + 
+                           p.beta[2] * mean(temp.surv[t,1:n.sec[t+1,m],m]) +
+                           p.beta[3] * rain.int[t+1,m] +
+                           p.beta[4] * mean(temp.surv[t,1:n.sec[t+1,m],m]) * rain.int[t+1,m] +
+                           eps.site[4,m] +
+                           mean(p.eps.survey[t,1:n.sec[t+1,m],m]))
+      
+    } # t
+  } # m
+  
+  for(t in 1:(n.prim - 1)){
+    
+    # Mean mortality hazard rates per primary occasion
+    mean.phi.t[t] <- mean(mean.phi[t,1:n.site])
+    
+    # Mean hazard rates of infection state transition per primary occasion
+    mean.psi12.t[t] <- mean(mean.psi12[t,1:n.site])
+    mean.psi21.t[t] <- mean(mean.psi21[t,1:n.site])
+    
+    # Mean recapture probabilities per primary occasion
+    mean.p.t[t] <- mean(mean.p[t,1:n.site])
+    
+  } # t
+  
+  # POSTERIOR PREDICTIVE CHECKS
+  
+  for(m in 1:n.site){
+    for(i in 1:n.ind.ppc[m]){
+      for(t in first[i,m]:(n.prim - 1)){
+        
+        # Observed state per primary
+        y.z[i,t,m] <- min(y[i,t+1,1:n.sec[t+1,m],m])
+        yrep.z[i,t,m] <- min(yrep[i,t+1,1:n.sec[t+1,m],m])
+        
+      } # t
+      
+      # Observed state transitions per primary 
+      for(t in first[i,m]:(n.prim - 2)){
+        
+        # Gains infection
+        Psi.it[1,i,t,m] <- equals(y.z[i,t,m], 1) * equals(y.z[i,t+1,m], 2)
+        Psirep.it[1,i,t,m] <- equals(yrep.z[i,t,m], 1) * equals(yrep.z[i,t+1,m], 2)
+        PsiE.it[1,i,t,m] <- TPM.z[1,2,i,t,m]
+        
+        # Clears infection
+        Psi.it[2,i,t,m] <- equals(y.z[i,t,m], 2) * equals(y.z[i,t+1,m], 1)
+        Psirep.it[2,i,t,m] <- equals(yrep.z[i,t,m], 2) * equals(yrep.z[i,t+1,m], 1)
+        PsiE.it[2,i,t,m] <- TPM.z[2,1,i,t,m]
+        
+      } # t
+    } # i
+      
+    for(s in 1:2){
+      for(i in 1:n.ind.ppc[m]){
+        for(t in first[i,m]:(n.prim - 1)){
+          for(j in 1:n.sec[t+1,m]){
+            
+            # Tally observed states for observed and predicted datasets
+            R.itj[s,i,t,j,m] <- equals(y[i,t+1,j,m], s)
+            Rrep.itj[s,i,t,j,m] <- equals(yrep[i,t+1,j,m], s)
+            
+            # Expected observed state
+            RE.itj[s,i,t,j,m] <- TPM.o[z[i,t+1,m],s,i,t,j,m]
+            
+          } # j
+
+          # Sum observed states over secondary surveys
+          R.it[s,i,t,m] <- sum(R.itj[s,i,t,1:n.sec[t+1,m],m])
+          Rrep.it[s,i,t,m] <- sum(Rrep.itj[s,i,t,1:n.sec[t+1,m],m])
+          
+          # Expected observed state
+          RE.it[s,i,t,m] <- sum(RE.itj[s,i,t,1:n.sec[t+1,m],m])
+          
+        } # t
+        
+        # Sum observed states over primary surveys
+        R.i[s,i,m] <- sum(R.it[s,i,first[i,m]:(n.prim-1),m])
+        Rrep.i[s,i,m] <- sum(Rrep.it[s,i,first[i,m]:(n.prim-1),m])
+          
+        # Expected observed state
+        RE.i[s,i,m] <- sum(RE.it[s,i,first[i,m]:(n.prim-1),m])
+        
+        # Freeman-Tukey on observed and predicted observed states per individual
+        R.ft[s,i,m] <- (R.i[s,i,m] ^ 0.5 - RE.i[s,i,m] ^ 0.5) ^ 2
+        Rrep.ft[s,i,m] <- (Rrep.i[s,i,m] ^ 0.5 - RE.i[s,i,m] ^ 0.5) ^ 2
+      
+        # Sum state transitions over primary surveys
+        Psi.i[s,i,m] <- sum(Psi.it[s,i,first[i,m]:(n.prim-2),m])
+        Psirep.i[s,i,m] <- sum(Psirep.it[s,i,first[i,m]:(n.prim-2),m])
+      
+        # Expected state transitions
+        PsiE.i[s,i,m] <- sum(PsiE.it[s,i,first[i,m]:(n.prim-2),m])
+        
+        # Freeman-Tukey on observed and predicted state transitions per individual
+        Psi.ft[s,i,m] <- (Psi.i[s,i,m] ^ 0.5 - PsiE.i[s,i,m] ^ 0.5) ^ 2
+        Psirep.ft[s,i,m] <- (Psirep.i[s,i,m] ^ 0.5 - PsiE.i[s,i,m] ^ 0.5) ^ 2
+        
+      } # i
+      
+      # Intermediate fit observations
+      R.int[s,m] <- sum(R.ft[s,1:n.ind.ppc[m],m])
+      Rrep.int[s,m] <- sum(Rrep.ft[s,1:n.ind.ppc[m],m])
+
+      # Intermediate fit state transitions
+      Psi.int[s,m] <- sum(Psi.ft[s,1:n.ind.ppc[m],m])
+      Psirep.int[s,m] <- sum(Psirep.ft[s,1:n.ind.ppc[m],m])
+      
+    } # s
+  } # m
+
+  # Bayesian p-values
+  R.bpv <- step(sum(Rrep.int[1:2,1:n.site]) - sum(R.int[1:2,1:n.site]))  
+  Psi.bpv <- step(sum(Psirep.int[1:2,1:n.site]) - sum(Psi.int[1:2,1:n.site]))  
+  
+})
+```
+
+\normalsize
+
+\newpage
+
+# References

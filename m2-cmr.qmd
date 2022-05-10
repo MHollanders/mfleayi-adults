@@ -1,0 +1,1787 @@
+---
+title: "Capture-recapture analysis"
+author: |
+  | Matthijs Hollanders, Laura F. Grogan, Catherine J. Nock, Hamish I. McCallum, David A. Newell
+  | 
+  | Manuscript: Recovered frog populations coexist with endemic *Batrachochytrium dendrobatidis* despite intensity-dependent mortality
+  | Journal: Ecological Applications
+editor_options: 
+  chunk_output_type: console
+---
+
+# Packages used
+
+```{r}
+library(tidyverse)
+library(abind)
+library(lmodel2)
+library(scales)
+library(patchwork)
+library(ggforce)
+library(ggtext)
+library(lubridate)
+library(nimble)
+library(MCMCvis)
+library(ggdist)
+library(HDInterval)
+```
+
+# Data preparation
+
+## Load (meta)data
+
+```{r}
+# Metadata
+n.ind <- c(462, 136, 88)  # Number of individuals at Brindle, Tuntable, and Bat Cave
+n.prim <- 23              # Number of primary survey occasions
+n.site <- 3               # Number of sites
+
+# Capture history
+ch <- array(unlist(read.csv("data/ch.csv", header = F)), c(max(n.ind), n.prim, 3, n.site))
+ch.ms <- ch
+ch.ms[ch.ms == 0] <- 3
+
+# Metadata (continued)
+n.sec <- apply(ch[1,,,], c(1, 3), function(x) length(which(!is.na(x))))  # Secondaries
+n.sec[n.sec == 0] <- 1
+ints <- read.csv("data/ints.csv", header = T)                                 # Primary intervals
+dates <- read_csv("data/dates.csv") %>%                                       # Primary dates
+  mutate(brindle = dmy(brindle),
+         tuntable = dmy(tuntable),
+         batcave = dmy(batcave)) 
+# Modeled primaries only
+dates.long.22 <- c(dates[-1,]$brindle, dates[-1,]$tuntable, dates[-1,]$batcave)
+# All primaries
+dates.long.23 <- c(dates$brindle, dates$tuntable, dates$batcave)
+```
+
+## Initial values etc.
+
+In the next chunk, we create several arrays as input for the model. First, we modify our 4-D array to a 3-D array to reflect the observed ecological state *z* per primary occasion. Next, we create arrays to hold the first and last capture occasions per individual. We then create the initial values array of the latent ecological states *z* for the MCMC. Finally, we create an array for the known state at first capture, as the model conditions on first capture.
+
+```{r}
+# Ecological state per primary occasion
+z.primary <- ch
+z.primary[is.na(z.primary)] <- 0 # Convert missing surveys to not captured
+z.primary <- apply(z.primary, c(1, 2, 4), max)
+
+# First and last capture
+first <- last <- array(NA, c(max(n.ind), n.site))
+for(m in 1:n.site){
+  for(i in 1:n.ind[m]){
+    first[i,m] <- min(which(z.primary[i,,m] > 0))
+    last[i,m] <- max(which(z.primary[i,,m] > 0))
+  } # i
+} # m
+
+# Ecological state initial values array
+z.init <- array(NA, c(dim(z.primary)))
+for(m in 1:n.site){
+  for(i in 1:n.ind[m]){
+    if(first[i,m] != last[i,m]){
+      for(t in (first[i,m] + 1):last[i,m]){
+        z.init[i,t,m] <- z.primary[i,t,m]
+      } # t
+    }
+    if(last[i,m] != n.prim){
+      for(t in (last[i,m] + 1):n.prim){
+        z.init[i,t,m] <- 3
+      } # t
+    }
+  } # i
+} # m
+z.init[z.init == 0] <- 1  # Convert not captured to alive and uninfected
+
+# Ecological state at first capture
+z.first <- array(NA, c(dim(z.primary)))
+for(m in 1:n.site){
+  for(i in 1:n.ind[m]){
+    z.first[i,first[i,m],m] <- z.primary[i,first[i,m],m]
+  } # i
+} # m
+
+# State transitions
+trans.states <- z.primary
+trans.states[trans.states == 0] <- NA
+trans.states.ordered <- array(NA, dim = c(nrow(z.primary), ncol(z.primary), dim(z.primary)[3]))
+trans <- array(NA, dim = c(nrow(z.primary), ncol(z.primary) - 1, dim(z.primary)[3]))
+for(i in 1:dim(trans.states)[1]){
+  for(m in 1:dim(trans.states)[3]){
+    trans.states.ordered[i,,m] <- c(trans.states[i,which(!is.na(trans.states[i,,m])),m],
+                                    rep(NA, length(which(is.na(trans.states[i,,m])))))
+    for(t in 1:dim(trans)[2]){
+      trans[i,t,m] <- ifelse(trans.states.ordered[i,t,m] == 1 & trans.states.ordered[i,t+1,m] == 2, 1,
+                             ifelse(trans.states.ordered[i,t,m] == 2 & trans.states.ordered[i,t+1,m] == 1, 2, 0))
+    } # t
+  } # m
+} # i
+```
+
+## Covariates
+
+Covariates for functions of parameters in the capture-recapture model get loaded below.
+
+-   Sex is binary predictor with '1' corresponding to females.
+-   Scaled mass index (SMI, $\hat{M_i}$) is calculated with the formula from @peig2009, specifically $\hat{M_i} = M_i\frac{L_i}{L_0}^{b_SMA}$, where $M_i$ and $L_i$ are the measured body weight and snout-to-urostyle length of individual *i*, $L_0$ is the arithmetic mean of the measured lengths, and $b_SMA$ is the standardized major axis regression coefficient of $\ln M$ on $\ln L$.
+-   Interval and survey daily minimum and maximum temperatures and daily rainfall were extracted from SILO [@jeffrey2001]. Daily temperature was calculated as the mean of the daily minima and maxima.
+
+```{r}
+# Function to center and scale by two standard deviations
+scl <- function(x) (x - mean(x, na.rm = T)) / (2 * sd(x, na.rm = T))
+
+# Sex
+sex <- read.csv("data/sex.csv", header = T)
+
+# Scaled mass index
+bw <- array(unlist(read.csv("data/bw.csv", header = F)), c(max(n.ind), n.prim, n.site))
+length <- array(unlist(read.csv("data/length.csv", header = F)), c(max(n.ind), n.prim, n.site))
+bsma <- lmodel2(c(log(bw)) ~ c(log(length)))$regression.results$Slope[3]
+Mhat <- bw * (mean(length, na.rm = T) / length) ^ bsma
+Mhat.scl <- scl(Mhat)
+
+# Infection intensity 
+loads <- array(unlist(read.csv("data/loads.csv", header = F)), c(max(n.ind), n.prim, n.site))
+log.loads <- log10(loads)
+log.loads.scl <- scl(log.loads)
+
+# Interval covariates
+covs.int <- read.csv("data/covs-int.csv", header = T)
+covs.int$temp.mean <- (covs.int$temp.max + covs.int$temp.min) / 2
+temp.int.scl <- array(scl(covs.int$temp.mean), dim = c(n.prim, n.site))
+rain.int.scl <- array(scl(covs.int$rain), dim = c(n.prim, n.site)) / rbind(rep(1, 3), ints)
+
+# Survey covariates
+covs.surv <- read.csv("data/covs-surv.csv", header = T)
+covs.surv$temp.mean <- (covs.surv$temp.max + covs.surv$temp.min) / 2
+temp.surv.scl <- array(scl(covs.surv$temp.mean), dim = c(n.prim, max(n.sec), n.site))
+rain.surv.scl <- array(scl(covs.surv$dailyrain), dim = c(n.prim, max(n.sec), n.site))
+```
+
+# Model
+
+## Nimble code
+
+Below is the NIMBLE code for the robust design multistate Cormack-Jolly-Seber model with continuous-time formulation of the ecological process. The inclusion of delta in the observation process is included to account for frogs not being swabbed on the final survey. Missing SMI, *Bd* infection intensity, and sex are imputed in the model (after standardization). Posterior predictive checks (PPCs) are conducted at the bottom. See Appendix S1 for more details.
+
+```{r}
+# Robust design multistate Cormack-Jolly-Seber model
+m2code <- nimbleCode({
+
+  # PRIORS
+  
+  # Indicator variable inclusion probability and interaction constraints (marginality)
+  psi ~ dbeta(1, 1)
+  constraint ~ dconstraint(phi.w[1] >= phi.w[3] & phi.w[2] >= phi.w[3] &
+                           phi.w[1] >= phi.w[6] & phi.w[5] >= phi.w[6] &
+                           phi.w[2] >= phi.w[7] & phi.w[5] >= phi.w[7] &
+                           psi12.w[1] >= psi12.w[3] & psi12.w[2] >= psi12.w[3] &
+                           psi21.w[1] >= psi21.w[3] & psi21.w[2] >= psi21.w[3] &
+                           p.w[2] >= p.w[4] & p.w[3] >= p.w[4] &
+                           load.w[1] >= load.w[3] & load.w[2] >= load.w[3])
+  
+  # Survival (phi)
+  phi.alpha ~ dexp(1)
+  for(i in 1:7){
+    phi.beta[i] ~ dt(0, sigma = 1, df = 4)
+    phi.w[i] ~ dbern(psi)
+  }
+  
+  # Gaining infection (psi12)
+  psi12.alpha ~ dexp(1)
+  for(i in 1:4){
+    psi12.beta[i] ~ dt(0, sigma = 1, df = 4)
+    psi12.w[i] ~ dbern(psi)
+  }
+  
+  # Clearing infection (psi21)
+  psi21.alpha ~ dexp(1)
+  for(i in 1:5){
+    psi21.beta[i] ~ dt(0, sigma = 1, df = 4)
+    psi21.w[i] ~ dbern(psi)
+  }
+  
+  # Recapture (p)
+  p.alpha ~ dbeta(1, 1)
+  for(i in 1:7){
+    p.beta[i] ~ dt(0, sigma = 1, df = 4)
+    p.w[i] ~ dbern(psi)
+  }
+  for(i in 1:2){
+    p.sigma[i] ~ T(dt(0, sigma = 1, df = 4), 0, )
+  }
+  
+  # Correlated random site effects (see NIMBLE manual section 5.2.4.1.2)
+  for(i in 1:4){
+    sigma.site[i] ~ T(dt(0, sigma = 1, df = 4), 0, )
+  }
+  chol.site[1:4,1:4] ~ dlkj_corr_cholesky(1.5, 4)                    # Prior on Cholesky factor
+  cor.site[1:4,1:4] <- t(chol.site[1:4,1:4]) %*% chol.site[1:4,1:4]  # Correlation matrix
+  
+  # Correlated random survey effects
+  for(i in 1:3){
+    sigma.survey[i] ~ T(dt(0, sigma = 1, df = 4), 0, )
+  }
+  chol.survey[1:3,1:3] ~ dlkj_corr_cholesky(1.5, 3)                        # Prior on Cholesky factor
+  cor.survey[1:3,1:3] <- t(chol.survey[1:3,1:3]) %*% chol.survey[1:3,1:3]  # Correlation matrix
+  
+  # IMPUTATION
+  
+  # Scaled mass index
+  SMI.alpha <- 0  # Centered predictor
+  for(i in 1:2){
+    SMI.sigma[i] ~ T(dt(0, sigma = 1, df = 4), 0, )
+  }
+  
+  # Infection intensity
+  load.alpha <- 0  # Centered predictor
+  for(i in 1:3){
+    load.beta[i] ~ dt(0, sigma = 1, df = 4)
+    load.w[i] ~ dbern(psi)
+  }
+  for(i in 1:2){
+    load.sigma[i] ~ T(dt(0, sigma = 2.5, df = 1), 0, )
+  }
+  
+  # Sex
+  sex.mu ~ dbeta(17, 3)  # Centered on observed sex ratio
+  
+  # RANDOM EFFECTS
+ 
+  for(m in 1:n.site){
+    
+    # Site effects (non-centered, multivariate)
+    eps.site[1:4,m] <- diag(sigma.site[1:4]) %*% t(chol.site[1:4,1:4]) %*% z.site[1:4,m]
+    for(j in 1:4){
+      z.site[j,m] ~ dnorm(0, 1)  # z-scores
+    }
+
+    for(t in 1:(n.prim - 1)){
+
+      # Survey effects (non-centered, multivariate)      
+      eps.survey[1:3,t,m] <- diag(sigma.survey[1:3]) %*% t(chol.survey[1:3,1:3]) %*% z.survey[1:3,t,m]
+      for(j in 1:3){
+        z.survey[j,t,m] ~ dnorm(0, 1)  # z-scores
+      } # j
+      
+      # Survey effects (non-centered, recapture)
+      for(j in 1:n.sec[t+1,m]){
+        p.eps.survey[t,j,m] <- z.survey.p[t,j,m] * p.sigma[1]
+        z.survey.p[t,j,m] ~ dnorm(0, 1)
+      } # j
+      
+    } # t
+    
+    # Individual effects (non-centered)
+    for(i in 1:n.ind[m]){
+      
+      p.eps.ind[i,m] <- z.ind[1,i,m] * p.sigma[2]
+      SMI.eps.ind[i,m] <- z.ind[2,i,m] * SMI.sigma[2]
+      load.eps.ind[i,m] <- z.ind[3,i,m] * load.sigma[2]
+      for(j in 1:3){
+        z.ind[j,i,m] ~ dnorm(0, 1)  # z-scores
+      } # j
+
+      # PARAMETERS
+
+      for(t in first[i,m]:(n.prim - 1)){
+        
+        # Mortality hazard Hazard rate of uninfected individuals (log)
+        log(phi1[i,t,m]) <- log(phi.alpha) +
+                            phi.w[1] * phi.beta[1] * SMI[i,t,m] +
+                            phi.w[2] * phi.beta[2] * temp.int[t+1,m] +
+                            phi.w[3] * phi.beta[3] * SMI[i,t,m] * temp.int[t+1,m] +
+                            eps.site[1,m] +
+                            eps.survey[1,t,m]
+        
+        # Mortality hazard Hazard rate of infected individuals (log)
+        log(phi2[i,t,m]) <- log(phi1[i,t,m]) +
+                            phi.w[4] * phi.beta[4] +
+                            phi.w[5] * phi.beta[5] * load[i,t,m] +
+                            phi.w[6] * phi.beta[6] * SMI[i,t,m] * load[i,t,m] +
+                            phi.w[7] * phi.beta[7] * temp.int[t+1,m] * load[i,t,m]
+        
+        # Hazard Hazard rate of gaining infection (log)
+        log(psi12[i,t,m]) <- log(psi12.alpha) +
+                             psi12.w[1] * psi12.beta[1] * temp.int[t+1,m] +
+                             psi12.w[2] * psi12.beta[2] * rain.int[t+1,m] +
+                             psi12.w[3] * psi12.beta[3] * temp.int[t+1,m] * rain.int[t+1,m] +
+                             psi12.w[4] * psi12.beta[4] * SMI[i,t,m] +
+                             eps.site[2,m] +
+                             eps.survey[2,t,m]
+        
+        # Hazard Hazard rate of clearing infection (log)
+        log(psi21[i,t,m]) <- log(psi21.alpha) +
+                             psi21.w[1] * psi21.beta[1] * temp.int[t+1,m] +
+                             psi21.w[2] * psi21.beta[2] * rain.int[t+1,m] +
+                             psi21.w[3] * psi21.beta[3] * temp.int[t+1,m] * rain.int[t+1,m] +
+                             psi21.w[4] * psi21.beta[4] * SMI[i,t,m] +
+                             psi21.w[5] * psi21.beta[5] * load[i,t,m] +
+                             eps.site[3,m] +
+                             eps.survey[3,t,m]
+        
+        for(j in 1:n.sec[t+1,m]){
+          
+          # Recapture of uninfected individuals (logit)
+          logit(p1[i,t,j,m]) <- logit(p.alpha) +
+                                p.w[1] * p.beta[1] * sex[i,m] + 
+                                p.w[2] * p.beta[2] * temp.surv[t,j,m] +
+                                p.w[3] * p.beta[3] * rain.int[t+1,m] +
+                                p.w[4] * p.beta[4] * temp.surv[t,j,m] * rain.int[t+1,m] +
+                                p.w[5] * p.beta[5] * SMI[i,t+1,m] +
+                                eps.site[4,m] +
+                                p.eps.survey[t,j,m] +
+                                p.eps.ind[i,m]
+          
+          # Recapture of infected individuals (logit)
+          logit(p2[i,t,j,m]) <- logit(p1[i,t,j,m]) + 
+                                p.w[6] * p.beta[6] +
+                                p.w[7] * p.beta[7] * load[i,t+1,m]
+          
+        } # j
+        
+        # ECOLOGICAL PROCESS
+
+        # Transition rate matrix (TRM)
+        
+        # Alive, Bd-
+        TRM.z[1,1,i,t,m] <- -(psi12[i,t,m] + phi1[i,t,m])  # Remains Bd-
+        TRM.z[1,2,i,t,m] <- psi12[i,t,m]                   # Becomes Bd+
+        TRM.z[1,3,i,t,m] <- phi1[i,t,m]                    # Dies
+        
+        # Alive, Bd+
+        TRM.z[2,1,i,t,m] <- psi21[i,t,m]                   # Becomes Bd-
+        TRM.z[2,2,i,t,m] <- -(psi21[i,t,m] + phi2[i,t,m])  # Remains Bd+ 
+        TRM.z[2,3,i,t,m] <- phi2[i,t,m]                    # Dies
+        
+        # Dead
+        TRM.z[3,1,i,t,m] <- 0                              # Becomes Bd-
+        TRM.z[3,2,i,t,m] <- 0                              # Becomes Bd+
+        TRM.z[3,3,i,t,m] <- 0                              # Dies
+        
+        # Matrix of eigenvectors of TRM.z
+        V[1:3,1:3,i,t,m] <- eigen(TRM.z[1:3,1:3,i,t,m])$vectors
+        
+        # Diagonal matrix of eigenvalues of TRM.z
+        D[1:3,1:3,i,t,m] <- diag(eigen(TRM.z[1:3,1:3,i,t,m])$values)
+        
+        # Exponential of D multiplied by primary survey intervals
+        expDtau[1,1,i,t,m] <- exp(D[1,1,i,t,m] * tau[t,m])
+        expDtau[1,2,i,t,m] <- 0
+        expDtau[1,3,i,t,m] <- 0
+        expDtau[2,1,i,t,m] <- 0
+        expDtau[2,2,i,t,m] <- exp(D[2,2,i,t,m] * tau[t,m])
+        expDtau[2,3,i,t,m] <- 0
+        expDtau[3,1,i,t,m] <- 0
+        expDtau[3,2,i,t,m] <- 0
+        expDtau[3,3,i,t,m] <- exp(D[3,3,i,t,m] * tau[t,m])
+        
+        # Transition probability matrix
+        TPM.z[1:3,1:3,i,t,m] <- V[1:3,1:3,i,t,m] %*% expDtau[1:3,1:3,i,t,m] %*% inverse(V[1:3,1:3,i,t,m])
+        
+        # OBSERVATION PROCESS (TPM)
+        
+        # delta is a vector of all 1's except for the last primary when we did not swab
+        
+        for(j in 1:n.sec[t+1,m]){
+          
+          # Alive, Bd-
+          TPM.o[1,1,i,t,j,m] <- p1[i,t,j,m]                   # Seen, Bd-
+          TPM.o[1,2,i,t,j,m] <- 0                             # Seen, Bd+
+          TPM.o[1,3,i,t,j,m] <- 1 - p1[i,t,j,m]               # Not seen
+          
+          # Alive, Bd+
+          TPM.o[2,1,i,t,j,m] <- p2[i,t,j,m] * (1 - delta[t])  # Seen, Bd-
+          TPM.o[2,2,i,t,j,m] <- p2[i,t,j,m] * delta[t]        # Seen, Bd+
+          TPM.o[2,3,i,t,j,m] <- 1 - p2[i,t,j,m]               # Not seen
+          
+          # Dead
+          TPM.o[3,1,i,t,j,m] <- 0                             # Seen, Bd-
+          TPM.o[3,2,i,t,j,m] <- 0                             # Seen, Bd+
+          TPM.o[3,3,i,t,j,m] <- 1                             # Not seen
+          
+        } # j
+      } # t
+      
+      # LIKELIHOOD        
+      
+      # Ecological state at first occasion
+      z[i,first[i,m],m] <- z.first[i,first[i,m],m]
+      
+      for(t in (first[i,m] + 1):n.prim){
+        
+        # Ecological process
+        z[i,t,m] ~ dcat(TPM.z[z[i,t-1,m],1:3,i,t-1,m])    
+        
+        for(j in 1:n.sec[t,m]){
+          
+          # Observation process
+          y[i,t,j,m] ~ dcat(TPM.o[z[i,t,m],1:3,i,t-1,j,m])
+          yrep[i,t,j,m] ~ dcat(TPM.o[z[i,t,m],1:3,i,t-1,j,m])
+          
+        } # j
+      } # t
+      
+      # IMPUTATION
+      
+      # Scaled mass index
+      SMI.mu[i,m] <- SMI.alpha + 
+                     SMI.eps.ind[i,m]
+      
+      for(t in first[i,m]:n.prim){
+        
+        SMI[i,t,m] ~ dnorm(SMI.mu[i,m], SMI.sigma[1])
+        
+        # Infection intensity
+        load.mu[i,t,m] <- load.alpha +
+                          load.w[1] * load.beta[1] * temp.int[t,m] +
+                          load.w[2] * load.beta[2] * rain.int[t,m] +
+                          load.w[3] * load.beta[3] * temp.int[t,m] * rain.int[t,m] +
+                          load.eps.ind[i,m]
+        load[i,t,m] ~ dnorm(load.mu[i,t,m], load.sigma[1])
+        
+      } # t
+      
+      # Sex
+      sex[i,m] ~ dbern(sex.mu)
+      
+    } # i
+    
+    # DERIVED PARAMETERS
+    
+    for(t in 1:(n.prim - 1)){
+      
+      # Mean survival probabilities per primary occasion per site
+      mean.phi[t,m] <- exp(-exp(log(phi.alpha) + 
+                                phi.beta[2] * temp.int[t+1,m] +
+                                eps.site[1,m] +
+                                eps.survey[1,t,m]))
+      
+      # Mean probabilities of gaining infection per primary occasion per site
+      mean.psi12[t,m] <- exp(-exp(log(psi12.alpha) + 
+                                  psi12.beta[1] * temp.int[t+1,m] +
+                                  psi12.beta[2] * rain.int[t+1,m] +
+                                  psi12.beta[3] * temp.int[t+1,m] * rain.int[t+1,m] + 
+                                  eps.site[2,m] +
+                                  eps.survey[2,t,m]))
+      
+      # Mean probabilities of gaining infection per primary occasion per site
+      mean.psi21[t,m] <- exp(-exp(log(psi21.alpha) +
+                                  psi21.beta[1] * temp.int[t+1,m] +
+                                  psi21.beta[2] * rain.int[t+1,m] +
+                                  psi21.beta[3] * temp.int[t+1,m] * rain.int[t+1,m] +
+                                  eps.site[3,m] +
+                                  eps.survey[3,t,m]))
+      
+      # Mean recapture probabilities per primary occasion per site
+      mean.p[t,m] <- expit(logit(p.alpha) + 
+                           p.beta[2] * mean(temp.surv[t,1:n.sec[t+1,m],m]) +
+                           p.beta[3] * rain.int[t+1,m] +
+                           p.beta[4] * mean(temp.surv[t,1:n.sec[t+1,m],m]) * rain.int[t+1,m] +
+                           eps.site[4,m] +
+                           mean(p.eps.survey[t,1:n.sec[t+1,m],m]))
+      
+    } # t
+  } # m
+  
+  for(t in 1:(n.prim - 1)){
+    
+    # Mean survival probabilities per primary occasion
+    mean.phi.t[t] <- mean(mean.phi[t,1:n.site])
+    
+    # Mean transition probabilities per primary occasion
+    mean.psi12.t[t] <- mean(mean.psi12[t,1:n.site])
+    mean.psi21.t[t] <- mean(mean.psi21[t,1:n.site])
+    
+    # Mean recapture probabilities per primary occasion
+    mean.p.t[t] <- mean(mean.p[t,1:n.site])
+    
+  } # t
+  
+  # POSTERIOR PREDICTIVE CHECKS
+  
+  # We conducted PPCs on two measures of the data. For the first (R), we tallied the number of times 
+  # each individual was observed as either uninfected or infected over the course of the study. 
+  # For the second (Psi), we tallied the number of observed state transitions over consecutive surveys
+  # for each individual over the course of the study (inspired by AHM2 Kéry & Royle 2020). We calculated   
+  # Freeman-Tukey statistics for each PPC and generated Bayesian p-values. Note that PPCs are conducted    
+  # alongside each other in the code below to avoid excessive opening and closing of for loops.
+  
+  for(m in 1:n.site){
+    for(i in 1:n.ind.ppc[m]){
+      for(t in first[i,m]:(n.prim - 1)){  # First occasion excluded because yrep simulated after first
+        
+        # Observed state per primary
+        y.z[i,t,m] <- min(y[i,t+1,1:n.sec[t+1,m],m])
+        yrep.z[i,t,m] <- min(yrep[i,t+1,1:n.sec[t+1,m],m])
+        
+      } # t
+      
+      # Observed state transitions per primary 
+      for(t in first[i,m]:(n.prim - 2)){
+        
+        Psi.it[1,i,t,m] <- equals(y.z[i,t,m], 1) * equals(y.z[i,t+1,m], 2) # Gains infection
+        Psi.it[2,i,t,m] <- equals(y.z[i,t,m], 2) * equals(y.z[i,t+1,m], 1) # Clears infection
+        Psirep.it[1,i,t,m] <- equals(yrep.z[i,t,m], 1) * equals(yrep.z[i,t+1,m], 2)
+        Psirep.it[2,i,t,m] <- equals(yrep.z[i,t,m], 2) * equals(yrep.z[i,t+1,m], 1)
+        PsiE.it[1,i,t,m] <- TPM.z[1,2,i,t,m]
+        PsiE.it[2,i,t,m] <- TPM.z[2,1,i,t,m]
+        
+      } # t
+    } # i
+      
+    for(s in 1:2){
+      for(i in 1:n.ind.ppc[m]){
+        for(t in first[i,m]:(n.prim - 1)){
+          for(j in 1:n.sec[t+1,m]){
+            
+            # Tally observed states for observed and predicted datasets
+            R.itj[s,i,t,j,m] <- equals(y[i,t+1,j,m], s)
+            Rrep.itj[s,i,t,j,m] <- equals(yrep[i,t+1,j,m], s)
+            
+            # Expected observed state
+            RE.itj[s,i,t,j,m] <- TPM.o[z[i,t+1,m],s,i,t,j,m]
+            
+          } # j
+
+          # Sum observed states over secondary surveys
+          R.it[s,i,t,m] <- sum(R.itj[s,i,t,1:n.sec[t+1,m],m])
+          Rrep.it[s,i,t,m] <- sum(Rrep.itj[s,i,t,1:n.sec[t+1,m],m])
+          
+          # Expected observed state
+          RE.it[s,i,t,m] <- sum(RE.itj[s,i,t,1:n.sec[t+1,m],m])
+          
+        } # t
+        
+        # Sum observed states over primary surveys
+        R.i[s,i,m] <- sum(R.it[s,i,first[i,m]:(n.prim-1),m])
+        Rrep.i[s,i,m] <- sum(Rrep.it[s,i,first[i,m]:(n.prim-1),m])
+          
+        # Expected observed state
+        RE.i[s,i,m] <- sum(RE.it[s,i,first[i,m]:(n.prim-1),m])
+        
+        # Freeman-Tukey on observed and predicted observed states per individual
+        R.ft[s,i,m] <- (R.i[s,i,m] ^ 0.5 - RE.i[s,i,m] ^ 0.5) ^ 2
+        Rrep.ft[s,i,m] <- (Rrep.i[s,i,m] ^ 0.5 - RE.i[s,i,m] ^ 0.5) ^ 2
+      
+        # Sum state transitions over primary surveys
+        Psi.i[s,i,m] <- sum(Psi.it[s,i,first[i,m]:(n.prim-2),m])
+        Psirep.i[s,i,m] <- sum(Psirep.it[s,i,first[i,m]:(n.prim-2),m])
+      
+        # Expected state transitions
+        PsiE.i[s,i,m] <- sum(PsiE.it[s,i,first[i,m]:(n.prim-2),m])
+        
+        # Freeman-Tukey on observed and predicted state transitions per individual
+        Psi.ft[s,i,m] <- (Psi.i[s,i,m] ^ 0.5 - PsiE.i[s,i,m] ^ 0.5) ^ 2
+        Psirep.ft[s,i,m] <- (Psirep.i[s,i,m] ^ 0.5 - PsiE.i[s,i,m] ^ 0.5) ^ 2
+        
+      } # i
+      
+      # Intermediate fit observations
+      R.int[s,m] <- sum(R.ft[s,1:n.ind.ppc[m],m])
+      Rrep.int[s,m] <- sum(Rrep.ft[s,1:n.ind.ppc[m],m])
+
+      # Intermediate fit state transitions
+      Psi.int[s,m] <- sum(Psi.ft[s,1:n.ind.ppc[m],m])
+      Psirep.int[s,m] <- sum(Psirep.ft[s,1:n.ind.ppc[m],m])
+      
+    } # s
+  } # m
+
+  # Bayesian p-values
+  R.bpv <- step(sum(R.int[1:2,1:n.site]) - sum(Rrep.int[1:2,1:n.site]))  
+  Psi.bpv <- step(sum(Psi.int[1:2,1:n.site]) - sum(Psirep.int[1:2,1:n.site]))  
+  
+})
+```
+
+## Input
+
+Data, constants, function for initial values, and the list of parameters to monitor by MCMC.
+
+```{r}
+# Data
+str(m2data <- list(y = ch.ms,
+                   SMI = Mhat.scl,
+                   load = log.loads.scl,
+                   sex = sex,
+                   constraint = 1))
+
+# Constants
+str(m2consts <- list(n.ind = n.ind,
+                     n.prim = n.prim,
+                     n.sec = n.sec,
+                     n.site = n.site,
+                     tau = simplify2array(ints),
+                     first = first,
+                     z.first = z.first,
+                     delta = c(rep(1, n.prim - 2), 0),
+                     temp.int = temp.int.scl,
+                     rain.int = simplify2array(rain.int.scl),
+                     temp.surv = temp.surv.scl[-1,,],
+                     n.ind.ppc = n.ind - apply(first, 2, function(x) length(which(x == n.prim - 1)))
+                     ))
+
+# Initial values
+m2inits <- function() list(z = z.init, psi = 1,
+                           phi.alpha = runif(1), phi.beta = rep(0, 7),
+                           psi12.alpha = runif(1), psi12.beta = rep(0, 4),
+                           psi21.alpha = runif(1), psi21.beta = rep(0, 5),
+                           p.alpha = runif(1), p.beta = rep(0, 7), p.sigma = runif(2), 
+                           sigma.site = runif(4), chol.site = diag(4),
+                           sigma.survey = runif(3), chol.survey = diag(3)
+                           )
+
+# Monitors
+parents <- c("phi.alpha", "phi.beta", "phi.w",
+             "psi12.alpha", "psi12.beta", "psi12.w",
+             "psi21.alpha", "psi21.beta", "psi21.w", 
+             "p.alpha", "p.beta", "p.w", "p.sigma",
+             "eps.site", "sigma.site", "cor.site", "sigma.survey", "cor.survey",
+             "load.alpha", "load.beta", "load.w", "load.sigma", "SMI.alpha", "SMI.sigma",
+             "psi", "R.bpv", "Psi.bpv")
+derived <- c("mean.phi", "mean.phi.t",
+             "mean.psi12", "mean.psi12.t", 
+             "mean.psi21", "mean.psi21.t", 
+             "mean.p", "mean.p.t")
+```
+
+## MCMC
+
+First, the model object is created and compiled. Next, MCMC is configured, including Reversible Jump MCMC (RJMCMC). The MCMC is then built, compiled with the compiled model object, and run. Our final model took 2-3 days to run, so it is a good idea to merge the different chains and saved as a single outp1t for post-processing after.
+
+```{r}
+start.time <- Sys.time()
+# Create model and compile
+m2model <- nimbleModel(m2code, m2consts, m2data, m2inits(), calculate = F, check = F)
+Cm2model <- compileNimble(m2model)
+
+# Configure and build MCMC and compile
+m2conf <- configureMCMC(m2model, monitors = c(parents, derived))
+configureRJ(m2conf,
+            targetNodes = c("phi.beta", "psi12.beta", "psi21.beta", "p.beta", "load.beta"),
+            indicatorNodes = c("phi.w", "psi12.w", "psi21.w", "p.w", "load.w"))
+m2conf
+m2mcmc <- buildMCMC(m2conf)
+Cm2mcmc <- compileNimble(m2mcmc, project = Cm2model, resetFunctions = T)
+
+# Run MCMC
+m2samples <- runMCMC(Cm2mcmc, nchains = 4, niter = 30000, nburnin = 5000, thin = 10)
+end.time <- Sys.time()
+end.time - start.time
+
+# Save
+m2draws <- do.call(rbind, m2samples)
+write.csv(m2draws, "m2draws.csv")
+write.csv(MCMCsummary(m2samples, round = 3, params = derived, HPD = T, func = median, func_name = "median"),
+          "m2summary.csv")
+
+
+```
+
+### Summary and traceplots
+
+```{r}
+MCMCsummary(m2samples, round = 3, params = parents)
+
+# Coefficients
+par(mfrow = c(2, 2))
+MCMCplot(m2samples, horiz = F, params = "phi.beta")
+MCMCplot(m2samples, horiz = F, params = "psi12.beta")
+MCMCplot(m2samples, horiz = F, params = "psi21.beta")
+MCMCplot(m2samples, horiz = F, params = "p.beta")
+
+# Derived
+MCMCplot(m2samples, horiz = F, params = "mean.phi.t", ylim = c(0, 1))
+MCMCplot(m2samples, horiz = F, params = "mean.psi12.t", ylim = c(0, 1))
+MCMCplot(m2samples, horiz = F, params = "mean.psi21.t", ylim = c(0, 1))
+MCMCplot(m2samples, horiz = F, params = "mean.p.t", ylim = c(0, 1))
+
+# Trace
+MCMCtrace(m2samples, params = parents, Rhat = T, n.eff = T, ind = T)
+```
+
+# Figures
+
+```{r}
+# Load previous run samples 
+m2draws <- read_csv("mcmc-samples/m2-draws.csv") %>%
+  mutate(`phi.alpha.mu` = exp((3 * log(`phi.alpha`) + `eps.site[1, 1]` + `eps.site[1, 2]` + `eps.site[1, 3]`) / 3),
+         `psi12.alpha.mu` = exp((3 * log(`psi12.alpha`) + `eps.site[2, 1]` + `eps.site[2, 2]` + `eps.site[2, 3]`) / 3),
+         `psi21.alpha.mu` = exp((3 * log(`psi21.alpha`) + `eps.site[3, 1]` + `eps.site[3, 2]` + `eps.site[3, 3]`) / 3),
+         `p.alpha.mu` = plogis((3 * qlogis(`p.alpha`) + `eps.site[4, 1]` + `eps.site[4, 2]` + `eps.site[4, 3]`) / 3))
+m2summary <- read_csv("mcmc-samples/m2-summary.csv")
+n.pred <- 500
+
+# Plot setup
+theme_set(theme_classic(base_size = 9, 
+                        base_family = "Helvetica"))
+theme_update(axis.ticks = element_line(color = "#333333"),
+             axis.line = element_line(color = "#333333"),
+             axis.title = element_text(color = "#333333"),
+             axis.text = element_text(color = "#333333"),
+             legend.title = element_text(color = "#333333"),
+             legend.text = element_text(color = "#333333"),
+             legend.position = "none",
+             strip.text = element_text(size = rel(1)),
+             strip.background = element_rect(color = NA))
+```
+
+## Average cmr estimates overaged over sites
+
+```{r}
+# phi
+mean.phi.raw <- m2draws %>%
+  select(starts_with("mean.phi"))
+mean.phi.raw.mu <- (-log(mean.phi.raw[,1:22]) + -log(mean.phi.raw[,23:44]) + -log(mean.phi.raw[,45:66])) / 3
+mean.phi.mu <- tibble(median = apply(mean.phi.raw.mu, 2, median),
+                      lower = apply(mean.phi.raw.mu, 2, function(x) hdi(x))[1,],
+                      upper = apply(mean.phi.raw.mu, 2, function(x) hdi(x))[2,])
+
+# Seasons
+seasons <- function(y = y, site = site) {
+  geom_rect(aes(xmin = ymd("2017-10-01"), xmax = ymd("2018-04-01"), ymin = 0, ymax = ylim / 20),
+            data = tibble(date = dates.long.22)[site,],
+            fill = "#9b332b",
+            alpha = 2/3) +
+  geom_rect(aes(xmin = ymd("2018-10-01"), xmax = ymd("2019-04-01"), ymin = 0, ymax = ylim / 20),
+            data = tibble(date = dates.long.22)[site,],
+            fill = "#9b332b",
+            alpha = 2/3) +
+  geom_rect(aes(xmin = ymd("2019-10-01"), xmax = ymd("2020-04-01"), ymin = 0, ymax = ylim / 20),
+            data = tibble(date = dates.long.22)[site,],
+            fill = "#9b332b",
+            alpha = 2/3) +
+  geom_rect(aes(xmin = ymd("2020-10-01"), xmax = ymd("2021-04-01"), ymin = 0, ymax = ylim / 20),
+            data = tibble(date = dates.long.22)[site,],
+            fill = "#9b332b",
+            alpha = 2/3) +
+  geom_rect(aes(xmin = ymd("2017-07-01"), xmax = ymd("2017-10-01"), ymin = 0, ymax = ylim / 20),
+            data = tibble(date = dates.long.22)[site,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  geom_rect(aes(xmin = ymd("2018-04-01"), xmax = ymd("2018-10-01"), ymin = 0, ymax = ylim / 20),
+            data = tibble(date = dates.long.22)[site,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  geom_rect(aes(xmin = ymd("2019-04-01"), xmax = ymd("2019-10-01"), ymin = 0, ymax = ylim / 20),
+            data = tibble(date = dates.long.22)[site,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  geom_rect(aes(xmin = ymd("2020-04-01"), xmax = ymd("2020-10-01"), ymin = 0, ymax = ylim / 20),
+            data = tibble(date = dates.long.22)[site,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  geom_rect(aes(xmin = ymd("2021-04-01"), xmax = ymd("2021-07-01"), ymin = 0, ymax = ylim / 20),
+            data = tibble(date = dates.long.22)[site,],
+            fill = "#41485f",
+            alpha = 1/2)
+}
+
+# Plot
+figcmrphi <- 
+  mean.phi.mu %>%
+  mutate(date = dates$brindle[-1]) %>%
+  ggplot(aes(x = date))  +
+  # Season
+  geom_rect(aes(xmin = ymd("2017-10-01"), xmax = ymd("2018-04-01"), ymin = 0, ymax = 0.45 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#9b332b",
+            alpha = 2/3) +
+  geom_rect(aes(xmin = ymd("2018-10-01"), xmax = ymd("2019-04-01"), ymin = 0, ymax = 0.45 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#9b332b",
+            alpha = 2/3) +
+  geom_rect(aes(xmin = ymd("2019-10-01"), xmax = ymd("2020-04-01"), ymin = 0, ymax = 0.45 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#9b332b",
+            alpha = 2/3) +
+  geom_rect(aes(xmin = ymd("2020-10-01"), xmax = ymd("2021-04-01"), ymin = 0, ymax = 0.45 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#9b332b",
+            alpha = 2/3) +
+  geom_rect(aes(xmin = ymd("2017-07-01"), xmax = ymd("2017-10-01"), ymin = 0, ymax = 0.45 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  geom_rect(aes(xmin = ymd("2018-04-01"), xmax = ymd("2018-10-01"), ymin = 0, ymax = 0.45 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  geom_rect(aes(xmin = ymd("2019-04-01"), xmax = ymd("2019-10-01"), ymin = 0, ymax = 0.45 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  geom_rect(aes(xmin = ymd("2020-04-01"), xmax = ymd("2020-10-01"), ymin = 0, ymax = 0.45 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  geom_rect(aes(xmin = ymd("2021-04-01"), xmax = ymd("2021-07-01"), ymin = 0, ymax = 0.45 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  # Estimates
+  geom_pointrange(aes(y = median, ymin = lower, ymax = upper),
+                  shape = 16,
+                  color = "#333333",
+                  size = 0.3) +
+  # Axes
+  scale_x_date(date_breaks = "1 year",
+               date_labels = "%m-%Y",
+               expand = c(0, 0)) +
+  scale_y_continuous(breaks = seq(0.1, 5, 0.1),
+                     expand = c(0, 0)) +
+  coord_cartesian(ylim = c(0, 0.45)) +
+  labs(x = "Primary survey occasion",
+       y = "Apparent mortality rate")
+
+# psi12
+mean.psi12.raw <- m2draws %>%
+  select(starts_with("mean.psi12"))
+mean.psi12.raw.mu <- (-log(mean.psi12.raw[,1:22]) + -log(mean.psi12.raw[,23:44]) + -log(mean.psi12.raw[,45:66])) / 3
+mean.psi12.mu <- tibble(median = apply(mean.psi12.raw.mu, 2, median),
+                   lower = apply(mean.psi12.raw.mu, 2, function(x) hdi(x))[1,],
+                   upper = apply(mean.psi12.raw.mu, 2, function(x) hdi(x))[2,])
+# Plot
+figcmrpsi12 <- 
+  mean.psi12.mu %>%
+  mutate(date = dates$brindle[-1]) %>%
+  ggplot(aes(x = date)) +
+  # Seasons
+  geom_rect(aes(xmin = ymd("2017-10-01"), xmax = ymd("2018-04-01"), ymin = 0, ymax = 4.5 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#9b332b",
+            alpha = 2/3) +
+  geom_rect(aes(xmin = ymd("2018-10-01"), xmax = ymd("2019-04-01"), ymin = 0, ymax = 4.5 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#9b332b",
+            alpha = 2/3) +
+  geom_rect(aes(xmin = ymd("2019-10-01"), xmax = ymd("2020-04-01"), ymin = 0, ymax = 4.5 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#9b332b",
+            alpha = 2/3) +
+  geom_rect(aes(xmin = ymd("2020-10-01"), xmax = ymd("2021-04-01"), ymin = 0, ymax = 4.5 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#9b332b",
+            alpha = 2/3) +
+  geom_rect(aes(xmin = ymd("2017-07-01"), xmax = ymd("2017-10-01"), ymin = 0, ymax = 4.5 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  geom_rect(aes(xmin = ymd("2018-04-01"), xmax = ymd("2018-10-01"), ymin = 0, ymax = 4.5 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  geom_rect(aes(xmin = ymd("2019-04-01"), xmax = ymd("2019-10-01"), ymin = 0, ymax = 4.5 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  geom_rect(aes(xmin = ymd("2020-04-01"), xmax = ymd("2020-10-01"), ymin = 0, ymax = 4.5 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  geom_rect(aes(xmin = ymd("2021-04-01"), xmax = ymd("2021-07-01"), ymin = 0, ymax = 4.5 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  # Estimates
+  geom_pointrange(aes(y = median, ymin = lower, ymax = upper),
+                  shape = 16,
+                  color = "#333333",
+                  size = 0.3) +
+  # Axes
+  scale_x_date(date_breaks = "1 year",
+               date_labels = "%m-%Y",
+               expand = c(0, 0)) +
+  scale_y_continuous(breaks = seq(1, 5, 1),
+                     expand = c(0, 0)) +
+  coord_cartesian(ylim = c(0, 4.5)) +
+  labs(x = "Primary survey occasion",
+       y = expression(paste("Hazard rate of gaining ", italic("Bd"))))
+
+# psi21
+mean.psi21.raw <- m2draws %>%
+  select(starts_with("mean.psi21"))
+mean.psi21.raw.mu <- (-log(mean.psi21.raw[,1:22]) + -log(mean.psi21.raw[,23:44]) + -log(mean.psi21.raw[,45:66])) / 3
+mean.psi21.mu <- tibble(median = apply(mean.psi21.raw.mu, 2, median),
+                   lower = apply(mean.psi21.raw.mu, 2, function(x) hdi(x))[1,],
+                   upper = apply(mean.psi21.raw.mu, 2, function(x) hdi(x))[2,])
+# Plot
+figcmrpsi21 <- 
+  mean.psi21.mu %>%
+  mutate(date = dates$brindle[-1]) %>%
+  ggplot(aes(x = date)) +
+  # Seasons
+  geom_rect(aes(xmin = ymd("2017-10-01"), xmax = ymd("2018-04-01"), ymin = 0, ymax = 18 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#9b332b",
+            alpha = 2/3) +
+  geom_rect(aes(xmin = ymd("2018-10-01"), xmax = ymd("2019-04-01"), ymin = 0, ymax = 18 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#9b332b",
+            alpha = 2/3) +
+  geom_rect(aes(xmin = ymd("2019-10-01"), xmax = ymd("2020-04-01"), ymin = 0, ymax = 18 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#9b332b",
+            alpha = 2/3) +
+  geom_rect(aes(xmin = ymd("2020-10-01"), xmax = ymd("2021-04-01"), ymin = 0, ymax = 18 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#9b332b",
+            alpha = 2/3) +
+  geom_rect(aes(xmin = ymd("2017-07-01"), xmax = ymd("2017-10-01"), ymin = 0, ymax = 18 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  geom_rect(aes(xmin = ymd("2018-04-01"), xmax = ymd("2018-10-01"), ymin = 0, ymax = 18 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  geom_rect(aes(xmin = ymd("2019-04-01"), xmax = ymd("2019-10-01"), ymin = 0, ymax = 18 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  geom_rect(aes(xmin = ymd("2020-04-01"), xmax = ymd("2020-10-01"), ymin = 0, ymax = 18 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  geom_rect(aes(xmin = ymd("2021-04-01"), xmax = ymd("2021-07-01"), ymin = 0, ymax = 18 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  # Estimates
+  geom_pointrange(aes(y = median, ymin = lower, ymax = upper),
+                  shape = 16,
+                  color = "#333333",
+                  size = 0.3) +
+  # Scales
+  scale_x_date(date_breaks = "1 year",
+               date_labels = "%m-%Y",
+               expand = c(0, 0)) +
+  scale_y_continuous(breaks = seq(4, 16, 4),
+                     expand = c(0, 0)) +
+  coord_cartesian(ylim = c(0, 18)) +
+  labs(x = "Primary survey occasion",
+       y = expression(paste("Hazard rate of clearing ", italic("Bd"))))
+
+# p
+mean.p.raw <- m2draws %>%
+  select(starts_with("mean.p"))
+mean.p.raw.mu <- logit((ilogit(mean.p.raw[,1:22]) + ilogit(mean.p.raw[,23:44]) + ilogit(mean.p.raw[,45:66])) / 3)
+mean.p.mu <- tibble(median = apply(mean.p.raw.mu, 2, median),
+                    lower = apply(mean.p.raw.mu, 2, function(x) hdi(x))[1,],
+                    upper = apply(mean.p.raw.mu, 2, function(x) hdi(x))[2,])
+# Plot
+figcmrp <- 
+  mean.p.mu %>%
+  mutate(date = dates$brindle[-1]) %>%
+  ggplot(aes(x = date)) +
+  # Seasons
+  geom_rect(aes(xmin = ymd("2017-10-01"), xmax = ymd("2018-04-01"), ymin = 0, ymax = 1.0029 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#9b332b",
+            alpha = 2/3) +
+  geom_rect(aes(xmin = ymd("2018-10-01"), xmax = ymd("2019-04-01"), ymin = 0, ymax = 1.0029 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#9b332b",
+            alpha = 2/3) +
+  geom_rect(aes(xmin = ymd("2019-10-01"), xmax = ymd("2020-04-01"), ymin = 0, ymax = 1.0029 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#9b332b",
+            alpha = 2/3) +
+  geom_rect(aes(xmin = ymd("2020-10-01"), xmax = ymd("2021-04-01"), ymin = 0, ymax = 1.0029 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#9b332b",
+            alpha = 2/3) +
+  geom_rect(aes(xmin = ymd("2017-07-01"), xmax = ymd("2017-10-01"), ymin = 0, ymax = 1.0029 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  geom_rect(aes(xmin = ymd("2018-04-01"), xmax = ymd("2018-10-01"), ymin = 0, ymax = 1.0029 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  geom_rect(aes(xmin = ymd("2019-04-01"), xmax = ymd("2019-10-01"), ymin = 0, ymax = 1.0029 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  geom_rect(aes(xmin = ymd("2020-04-01"), xmax = ymd("2020-10-01"), ymin = 0, ymax = 1.0029 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  geom_rect(aes(xmin = ymd("2021-04-01"), xmax = ymd("2021-07-01"), ymin = 0, ymax = 1.0029 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  # Estimates
+  geom_pointrange(aes(y = median, ymin = lower, ymax = upper),
+                  shape = 16,
+                  color = "#333333",
+                  size = 0.3) +
+  # Scales
+  scale_x_date(date_breaks = "1 year",
+               date_labels = "%m-%Y",
+               expand = c(0, 0)) +
+  scale_y_continuous(breaks = seq(0.2, 1, 0.2),
+                     limits = c(0, 1.0029),
+                     expand = c(0, 0)) +
+  labs(x = "Primary survey occasion",
+       y = "Recapture probability")
+
+# Main and save
+figcmr <- (figcmrphi | figcmrpsi12) / (figcmrpsi21 | figcmrp) +
+  plot_annotation(tag_levels = "a") &
+  theme(plot.tag = element_text(face = "bold"))
+
+ggsave("figs/fig-cmr.jpg", figcmr, height = 5, width = 6, units = "in", dpi = 600)
+```
+
+
+## Apparent mortality as a function of *Bd* infection intensity 
+
+```{r}
+# Prediction curves
+load.pred <- seq(0, 6.3, length.out = n.pred)
+load.pred.scaled <- (load.pred - mean(log10(loads), na.rm = T)) / (2 * sd(log10(loads), na.rm = T))
+phi.pred <- array(NA, c(n.pred, nrow(m2draws)))
+for(i in 1:n.pred){
+  phi.pred[i,] <- exp(log(m2draws$`phi.alpha.mu`) +
+                             m2draws$`phi.beta[4]` +
+                             m2draws$`phi.beta[5]` * load.pred.scaled[i]
+  )
+}
+
+# Plot
+fig.phi <- 
+  tibble(pred = c(phi.pred)) %>%
+  mutate(load = rep(load.pred, nrow(m2draws))) %>%
+  ggplot(aes(x = load)) +
+  stat_lineribbon(aes(y = pred),
+                  .width = 0.95,
+                  point_interval = median_hdci, 
+                  size = 2/3,
+                  col = "#344E6A",
+                  fill = "#89a8c6") +
+  geom_rug(data = tibble(load = c(log10(loads[loads > 0]))), 
+           col = "#344E6A",
+           size = 0.2,
+           length = unit(0.05, "npc"),
+           alpha = 0.5) +
+  scale_x_continuous(breaks = 1:6,
+                     expand = c(0, 0),
+                     limits = c(0.7, 6.3),
+                     labels = function(x) {return(paste0("10^", x))}) +
+  scale_y_continuous(breaks = 1:3,
+                     expand = c(0, 0)) +
+  coord_cartesian(ylim = c(0, 3.5)) +
+  theme(axis.text.x = element_markdown()) +
+  labs(x = expression(paste(italic("Bd")," infection intensity")),
+       y = "Apparent mortality rate")
+
+ggsave("figs/fig-phi.jpg", fig.phi, height = 2.5, width = 3, units = "in", dpi = 600)
+```
+
+## Rates of gaining and clearing infection
+
+```{r}
+# Prediction curves
+rain.pred <- seq(0, 1000, length.out = n.pred)
+rain.pred.scaled <- (rain.pred - mean(covs.int$rain)) / (2 * sd(covs.int$rain))
+temp.pred <- seq(9, 27, length.out = n.pred)
+temp.pred.scaled <- (temp.pred - mean(covs.int$temp.mean)) / (2 * sd(covs.int$temp.mean))
+
+psi.pred <- array(NA, c(n.pred, nrow(m2draws), 2))
+for(i in 1:n.pred){
+  # Gaining as function of rain
+  psi.pred[i,,1] <- exp(log(m2draws$`psi12.alpha.mu`) +
+                          m2draws$`psi12.beta[2]` * rain.pred.scaled[i])
+  # Clearing as function of temp
+  psi.pred[i,,2] <- exp(log(m2draws$`psi21.alpha.mu`) +
+                          m2draws$`psi21.beta[1]` * temp.pred.scaled[i])
+}
+
+# Gaining as function of rain
+fig.psi12 <- 
+  tibble(pred = c(psi.pred[,,1]),
+         rain = rep(rain.pred, nrow(m2draws))) %>%
+  ggplot(aes(x = rain)) +
+  stat_lineribbon(aes(y = pred),
+                  .width = 0.95,
+                  point_interval = median_qi,
+                  size = 0,
+                  fill = "#3E69A2",
+                  alpha = 1/2) +
+  stat_lineribbon(aes(y = pred),
+                  .width = 0,
+                  color = "#3E69A2",
+                  size = 2/3,
+                  alpha = 1) +
+  geom_rug(data = tibble(rain = covs.int$rain / unlist(rbind(rep(1, 3), ints))), 
+           col = "#333333",
+           alpha = 0.5,
+           size = 0.2,
+           length = unit(0.05, "npc")) +
+  scale_x_continuous(breaks = seq(200, 1000, 200),
+                     expand = c(0, 0),
+                     limits = c(0, 900)) +
+  scale_y_continuous(breaks = seq(2, 8, 2),
+                     expand = c(0, 0)) +
+  coord_cartesian(ylim = c(0, 9)) +
+  labs(x = "Rainfall (mm)",
+       y = expression(paste("Rate of gaining ", italic("Bd"))))
+
+# Clearing as function of temp
+fig.psi21 <- 
+  tibble(pred = c(psi.pred[,,2]),
+         temp = rep(temp.pred, nrow(m2draws))) %>%
+  ggplot(aes(x = temp)) +
+  stat_lineribbon(aes(y = pred),
+                  .width = 0.95,
+                  point_interval = median_qi,
+                  size = 0,
+                  fill = "#d73027",
+                  alpha = 1/2) +
+  stat_lineribbon(aes(y = pred),
+                  .width = 0,
+                  color = "#d73027",
+                  size = 2/3,
+                  alpha = 1) +
+  geom_rug(data = tibble(temp = covs.int$temp.mean), 
+           col = "#333333",
+           alpha = 0.5,
+           size = 0.2,
+           length = unit(0.05, "npc")) +
+  scale_x_continuous(breaks = seq(10, 25, 5),
+                     expand = c(0, 0),
+                     limits = c(9, 26)) +
+  scale_y_continuous(breaks = seq(2, 8, 2),
+                     expand = c(0, 0)) +
+  coord_cartesian(ylim = c(0, 9)) +
+  labs(x = "Temperature (ºC)",
+       y = expression(paste("Rate of clearing ", italic("Bd"))))
+
+# Final
+fig.psi <- (fig.psi12 | fig.psi21) +
+  plot_annotation(tag_levels = "a") &
+  theme(plot.tag = element_text(face = "bold"))
+
+ggsave("figs/fig-psi.jpg", fig.psi, height = 2.5, width = 6, units = "in", dpi = 600)
+```
+
+## Recapture
+
+```{r}
+# Prediction curves body condition and sex
+Mhat.pred <- seq(-2.25, 2.25, length.out = n.pred)
+
+p.smi <- array(NA, c(n.pred, nrow(m2draws), 3))
+for(i in 1:n.pred){
+  # Male, uninfected
+  p.smi[i,,1] <- plogis(qlogis(m2draws$`p.alpha.mu`) + 
+                          m2draws$`p.beta[1]` * 0 +
+                          m2draws$`p.beta[5]` * Mhat.pred[i] +
+                          m2draws$`p.beta[6]` * 0)
+  # Male, infected
+  p.smi[i,,2] <- plogis(qlogis(m2draws$`p.alpha.mu`) + 
+                          m2draws$`p.beta[1]` * 0 +
+                          m2draws$`p.beta[5]` * Mhat.pred[i] +
+                          m2draws$`p.beta[6]` * 1)
+  # Female, uninfected
+  p.smi[i,,3] <- plogis(qlogis(m2draws$`p.alpha.mu`) + 
+                          m2draws$`p.beta[1]` * 1 +
+                          m2draws$`p.beta[5]` * Mhat.pred[i] +
+                          m2draws$`p.beta[6]` * 0)
+}
+
+# Plot 
+fig.p1 <- 
+  tibble(pred = c(p.smi), 
+         temp = rep(rep(Mhat.pred, nrow(m2draws)), 3),
+         group = sort(rep(c("0", "1", "2"), n.pred*nrow(m2draws)))) %>%
+  ggplot(aes(x = temp)) +
+  stat_lineribbon(aes(y = pred, fill = group),
+                  .width = 0.95,
+                  point_interval = median_hdci,
+                  size = 0,
+                  alpha = 0.5) +
+  stat_lineribbon(aes(y = pred, col = group),
+                  .width = 0,
+                  size = 2/3,
+                  alpha = 1) +
+  scale_color_manual(values = c("#1b9e77", "#d95f02", "#333333"),
+                     labels = c(expression(paste("Male, ", italic("Bd"), "–")),
+                                expression(paste("Male, ", italic("Bd"), "+")),
+                                "Female")) +
+  scale_fill_manual(values = c("#1b9e77", "#d95f02", "#333333")) +
+  guides(fill = "none",
+         color = guide_legend(title = expression(paste("Sex and ", italic("Bd"), " infection")),
+                              keyheight = 0.15, 
+                              keywidth = 0.15,
+                              default.unit = "inch",
+                              override.aes = list(fill = NA))) +
+  scale_x_continuous(expand = c(0, 0),
+                     limits = c(-2.25, 2.25)) +
+  scale_y_continuous(breaks = seq(0.2, 1, 0.2),
+                     expand = c(0, 0),
+                     limits = c(0, 1.0029)) +
+  labs(x = "Body condition (scaled mass index)",
+       y = "Recapture probability") +
+  theme(legend.position = c(0.03, 0.97),
+        legend.justification = c("left", "top"),
+        legend.text.align = 0)
+
+# Prediction curves temp and rain
+temp.pred <- seq(9, 26, length.out = n.pred)
+temp.pred.scaled <- (temp.pred - mean(covs.int$temp.mean)) / (2*sd(covs.int$temp.mean))
+dry <- (0 - mean(covs.int$rain)) / (2*sd(covs.int$rain))
+wet <- (575 - mean(covs.int$rain)) / (2*sd(covs.int$rain))
+
+p.temp <- array(NA, c(n.pred, nrow(m2draws), 2))
+for(i in 1:n.pred){
+  # Temp when dry
+  p.temp[i,,1] <- plogis(qlogis(m2draws$`p.alpha.mu`) + 
+                           m2draws$`p.beta[2]` * temp.pred.scaled[i] +
+                           m2draws$`p.beta[3]` * dry)
+  # Temp when wet
+  p.temp[i,,2] <- plogis(qlogis(m2draws$`p.alpha.mu`) + 
+                           m2draws$`p.beta[2]` * temp.pred.scaled[i] +
+                           m2draws$`p.beta[3]` * wet)
+}
+
+# Plot 
+fig.p2 <- 
+  tibble(pred = c(p.temp), 
+               temp = rep(rep(temp.pred, nrow(m2draws)), 2),
+               group = sort(rep(c("0", "1"), n.pred*nrow(m2draws)))) %>%
+  group_by(temp, group) %>%
+  ggplot(aes(x = temp)) +
+  stat_lineribbon(aes(y = pred, fill = group),
+                  .width = 0.95,
+                  point_interval = median_hdci,
+                  size = 0,
+                  alpha = 0.5,
+                  show.legend = F) +
+  stat_lineribbon(aes(y = pred, col = group),
+                  .width = 0,
+                  size = 2/3,
+                  alpha = 1) +
+  geom_rug(data = tibble(temp = covs.surv[,3]), 
+           col = "grey20",
+           alpha = 0.5,
+           size = 0.2,
+           length = unit(0.05, "npc")) +
+  scale_color_manual(values = c("#d73027", "#3E69A2"),
+                    labels = c("Dry", "Wet")) +
+  scale_fill_manual(values = c("#d73027", "#3E69A2")) +
+  guides(fill = "none",
+         color = guide_legend(title = "Rainfall",
+                              keyheight = 0.15, 
+                              keywidth = 0.15,
+                              default.unit = "inch",
+                              override.aes = list(fill = NA))) +
+  scale_x_continuous(breaks = seq(10, 25, 5),
+                     expand = c(0, 0),
+                     limits = c(9, 26)) +
+  scale_y_continuous(breaks = seq(0.2, 1, 0.2),
+                     expand = c(0, 0),
+                     limits = c(0, 1.0029)) +
+  labs(x = "Daily temperature (ºC)",
+       y = "Recapture probability")
+
+# Main and save
+fig.p <- (fig.p1 | fig.p2) +
+  plot_annotation(tag_levels = "a") &
+  theme(plot.tag = element_text(face = "bold"),
+        legend.position = c(0.03, 0.97),
+        legend.justification = c("left", "top"),
+        legend.text.align = 0)
+
+ggsave("figs/fig-p.jpg", fig.p, height = 2.5, width = 6, units = "in", dpi = 600)
+```
+
+## Supplementary figures
+
+### Raw captures, *Bd* infection prevalence, and *Bd* infection intensity of *M. fleayi* per primary occasion
+
+```{r}
+# Prep
+all.caps <- apply(z.primary, c(2,3), function(x) length(which(x != 0)))
+new.caps <- apply(z.first, c(2,3), function(x) length(which(!is.na(x))))
+old.caps <- all.caps - new.caps
+prev.prim <- apply(z.primary, c(2,3), function(x) length(which(x == 2)) / length(which(x == 1 | x == 2)) + 0.01)
+N.prim <- log10(apply(loads, c(2,3), function(x) mean(na.omit(x))))
+
+# Counts
+counts <-
+  tibble(caps = c(new.caps, old.caps),
+         site = factor(rep(c(rep("Brindle Creek", n.prim), rep("Tuntable Creek", n.prim), rep("Bat Cave Creek", n.prim)),2),
+                       levels = c("Brindle Creek", "Tuntable Creek", "Bat Cave Creek")),
+         date = rep(dates.long.23, 2),
+         new = factor(c(rep("Yes", length(new.caps)), rep("No", length(new.caps))),
+                      levels = c("Yes", "No"))) %>%
+  ggplot(aes(x = date)) +
+  facet_wrap(~ site, scales = "free") +
+  # Seasons
+  geom_rect(aes(xmin = ymd("2017-10-01"), xmax = ymd("2018-04-01"), ymin = 0, ymax = 110 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#9b332b",
+            alpha = 2/3) +
+  geom_rect(aes(xmin = ymd("2018-10-01"), xmax = ymd("2019-04-01"), ymin = 0, ymax = 110 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#9b332b",
+            alpha = 2/3) +
+  geom_rect(aes(xmin = ymd("2019-10-01"), xmax = ymd("2020-04-01"), ymin = 0, ymax = 110 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#9b332b",
+            alpha = 2/3) +
+  geom_rect(aes(xmin = ymd("2020-10-01"), xmax = ymd("2021-04-01"), ymin = 0, ymax = 110 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#9b332b",
+            alpha = 2/3) +
+  geom_rect(aes(xmin = ymd("2017-07-01"), xmax = ymd("2017-10-01"), ymin = 0, ymax = 110 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  geom_rect(aes(xmin = ymd("2018-04-01"), xmax = ymd("2018-10-01"), ymin = 0, ymax = 110 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  geom_rect(aes(xmin = ymd("2019-04-01"), xmax = ymd("2019-10-01"), ymin = 0, ymax = 110 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  geom_rect(aes(xmin = ymd("2020-04-01"), xmax = ymd("2020-10-01"), ymin = 0, ymax = 110 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  geom_rect(aes(xmin = ymd("2021-04-01"), xmax = ymd("2021-07-01"), ymin = 0, ymax = 110 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  # Captures
+  geom_col(aes(y = caps, fill = new),
+           alpha = 4/5,
+           width = 20) +
+  # Axes
+  scale_fill_manual(values = c("#5681ad", "#333333")) +
+  guides(fill = guide_legend(title = "New individuals?",
+                             keyheight = 0.1, 
+                             keywidth = 0.1,
+                             default.unit = "inch")) +
+  scale_x_date(date_breaks = "1 year",
+               date_labels = "%m-%Y",
+               expand = c(0, 0)) +
+  scale_y_continuous(breaks = c(20, 40, 60, 80, 100),
+                     limits = c(0, 110),
+                     expand = c(0, 0)) +
+  theme(legend.position = c(0.37, 0.9),
+        legend.justification = c("left", "top")) +
+  labs(x = "Primary survey occasion",
+       y = "Frog captures",
+       fill = "New captures?")
+
+# Infections
+infections <-
+  tibble(prev = c(prev.prim),
+         N = c(N.prim),
+         site = factor(c(rep("Brindle Creek", n.prim), rep("Tuntable Creek", n.prim), rep("Bat Cave Creek", n.prim)),
+                       levels = c("Brindle Creek", "Tuntable Creek", "Bat Cave Creek")),
+         date = dates.long.23)
+
+# Plot prevalence
+prev <-
+  infections %>%
+  ggplot(aes(x = date)) +
+  facet_wrap(~ site, scales = "free") +
+  # Seasons
+  geom_rect(aes(xmin = ymd("2017-10-01"), xmax = ymd("2018-04-01"), ymin = 0, ymax = 1.002 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#9b332b",
+            alpha = 2/3) +
+  geom_rect(aes(xmin = ymd("2018-10-01"), xmax = ymd("2019-04-01"), ymin = 0, ymax = 1.002 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#9b332b",
+            alpha = 2/3) +
+  geom_rect(aes(xmin = ymd("2019-10-01"), xmax = ymd("2020-04-01"), ymin = 0, ymax = 1.002 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#9b332b",
+            alpha = 2/3) +
+  geom_rect(aes(xmin = ymd("2020-10-01"), xmax = ymd("2021-04-01"), ymin = 0, ymax = 1.002 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#9b332b",
+            alpha = 2/3) +
+  geom_rect(aes(xmin = ymd("2017-07-01"), xmax = ymd("2017-10-01"), ymin = 0, ymax = 1.002 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  geom_rect(aes(xmin = ymd("2018-04-01"), xmax = ymd("2018-10-01"), ymin = 0, ymax = 1.002 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  geom_rect(aes(xmin = ymd("2019-04-01"), xmax = ymd("2019-10-01"), ymin = 0, ymax = 1.002 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  geom_rect(aes(xmin = ymd("2020-04-01"), xmax = ymd("2020-10-01"), ymin = 0, ymax = 1.002 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  geom_rect(aes(xmin = ymd("2021-04-01"), xmax = ymd("2021-07-01"), ymin = 0, ymax = 1.002 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  # Prevalence
+  geom_col(aes(y = prev),
+           alpha = 4/5,
+           width = 20) +
+  # Axes
+  scale_x_date(date_breaks = "1 year",
+               date_labels = "%m-%Y",
+               expand = c(0, 0)) +
+  scale_y_continuous(breaks = c(0.2, 0.4, 0.6, 0.8, 1),
+                     limits = c(0, 1.002),
+                     expand = c(0, 0)) +
+  labs(x = "Primary survey occasion",
+       y = expression(paste(italic("Bd"), " infection prevalence")))
+
+# Plot intensity
+N <-
+  infections %>%
+  ggplot(aes(x = date)) +
+  facet_wrap(~ site, scales = "free") +
+  # Seasons
+  geom_rect(aes(xmin = ymd("2017-10-01"), xmax = ymd("2018-04-01"), ymin = 0, ymax = 6.5 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#9b332b",
+            alpha = 2/3) +
+  geom_rect(aes(xmin = ymd("2018-10-01"), xmax = ymd("2019-04-01"), ymin = 0, ymax = 6.5 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#9b332b",
+            alpha = 2/3) +
+  geom_rect(aes(xmin = ymd("2019-10-01"), xmax = ymd("2020-04-01"), ymin = 0, ymax = 6.5 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#9b332b",
+            alpha = 2/3) +
+  geom_rect(aes(xmin = ymd("2020-10-01"), xmax = ymd("2021-04-01"), ymin = 0, ymax = 6.5 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#9b332b",
+            alpha = 2/3) +
+  geom_rect(aes(xmin = ymd("2017-07-01"), xmax = ymd("2017-10-01"), ymin = 0, ymax = 6.5 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  geom_rect(aes(xmin = ymd("2018-04-01"), xmax = ymd("2018-10-01"), ymin = 0, ymax = 6.5 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  geom_rect(aes(xmin = ymd("2019-04-01"), xmax = ymd("2019-10-01"), ymin = 0, ymax = 6.5 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  geom_rect(aes(xmin = ymd("2020-04-01"), xmax = ymd("2020-10-01"), ymin = 0, ymax = 6.5 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  geom_rect(aes(xmin = ymd("2021-04-01"), xmax = ymd("2021-07-01"), ymin = 0, ymax = 6.5 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  # Intensity
+  geom_col(aes(y = N),
+           alpha = 4/5,
+           width = 20) +
+  # Axes
+  scale_x_date(date_breaks = "1 year",
+               date_labels = "%m-%Y",
+               expand = c(0, 0)) +
+  scale_y_continuous(breaks = c(1:6),
+                     limits = c(0, 6.5),
+                     expand = c(0, 0),
+                     labels = function(x) {return(paste0("10^", x))}) +
+  theme(axis.text.y = element_markdown()) +
+  labs(x = "Primary survey occasion",
+       y = expression(paste(italic("Bd"), " infection intensity")))
+
+# Main and save
+figS1 <- counts / prev / N +
+  plot_annotation(tag_levels = "a") &
+  theme(plot.tag = element_text(face = "bold"))
+
+ggsave("figs/fig-s1.jpg", figS1, height = 7.5, width = 9, units = "in", dpi = 600)
+```
+
+### Average cmr estimates per primary occasion per site
+
+```{r}
+# phi
+mean.phi <- tibble(median = apply(-log(mean.phi.raw), 2, median),
+                   lower = apply(-log(mean.phi.raw), 2, function(x) hdi(x))[1,],
+                   upper = apply(-log(mean.phi.raw), 2, function(x) hdi(x))[2,])
+
+# Plot
+figSphi <- 
+  mean.phi[1:66,] %>%
+  mutate(site = factor(c(rep("Brindle Creek",n.prim-1), rep("Tuntable Creek",n.prim-1), rep("Bat Cave Creek", n.prim-1)),
+                       levels = c("Brindle Creek", "Tuntable Creek", "Bat Cave Creek")),
+         date = dates.long.22,
+         primary = c(rep(1:(n.prim-1), n.site))) %>%
+  ggplot(aes(x = date)) +
+  facet_wrap(~ site, scales = "free") +
+  # Seasons
+  geom_rect(aes(xmin = ymd("2017-10-01"), xmax = ymd("2018-04-01"), ymin = 0, ymax = 0.45 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#9b332b",
+            alpha = 2/3) +
+  geom_rect(aes(xmin = ymd("2018-10-01"), xmax = ymd("2019-04-01"), ymin = 0, ymax = 0.45 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#9b332b",
+            alpha = 2/3) +
+  geom_rect(aes(xmin = ymd("2019-10-01"), xmax = ymd("2020-04-01"), ymin = 0, ymax = 0.45 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#9b332b",
+            alpha = 2/3) +
+  geom_rect(aes(xmin = ymd("2020-10-01"), xmax = ymd("2021-04-01"), ymin = 0, ymax = 0.45 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#9b332b",
+            alpha = 2/3) +
+  geom_rect(aes(xmin = ymd("2017-07-01"), xmax = ymd("2017-10-01"), ymin = 0, ymax = 0.45 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  geom_rect(aes(xmin = ymd("2018-04-01"), xmax = ymd("2018-10-01"), ymin = 0, ymax = 0.45 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  geom_rect(aes(xmin = ymd("2019-04-01"), xmax = ymd("2019-10-01"), ymin = 0, ymax = 0.45 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  geom_rect(aes(xmin = ymd("2020-04-01"), xmax = ymd("2020-10-01"), ymin = 0, ymax = 0.45 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  geom_rect(aes(xmin = ymd("2021-04-01"), xmax = ymd("2021-07-01"), ymin = 0, ymax = 0.45 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  # Estimates
+  geom_pointrange(aes(y = median, ymin = lower, ymax = upper, shape = site),
+                  color = "#333333",
+                  size = 0.3) +
+  # Axes
+  scale_x_date(date_breaks = "1 year",
+               date_labels = "%m-%Y",
+               expand = c(0, 0)) +
+  scale_y_continuous(breaks = seq(0.1, 5, 0.1),
+                     expand = c(0, 0)) +
+  coord_cartesian(ylim = c(0, 0.45)) +
+  labs(x = "Primary survey occasion",
+       y = "Apparent mortality rate")
+
+# psi12
+mean.psi12 <- tibble(median = apply(-log(mean.psi12.raw), 2, median),
+                   lower = apply(-log(mean.psi12.raw), 2, function(x) hdi(x, credMass = 0.95))[1,],
+                   upper = apply(-log(mean.psi12.raw), 2, function(x) hdi(x, credMass = 0.95))[2,])
+
+# Plot
+figSpsi12 <- 
+  mean.psi12[1:66,] %>%
+  mutate(site = factor(c(rep("Brindle Creek",n.prim-1), rep("Tuntable Creek",n.prim-1), rep("Bat Cave Creek", n.prim-1)),
+                       levels = c("Brindle Creek", "Tuntable Creek", "Bat Cave Creek")),
+         date = dates.long.22,
+         primary = c(rep(1:(n.prim-1), n.site))) %>%
+  ggplot(aes(x = date)) +
+  facet_wrap(~ site, scales = "free") +
+  # Seasons
+  geom_rect(aes(xmin = ymd("2017-10-01"), xmax = ymd("2018-04-01"), ymin = 0, ymax = 4.5 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#9b332b",
+            alpha = 2/3) +
+  geom_rect(aes(xmin = ymd("2018-10-01"), xmax = ymd("2019-04-01"), ymin = 0, ymax = 4.5 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#9b332b",
+            alpha = 2/3) +
+  geom_rect(aes(xmin = ymd("2019-10-01"), xmax = ymd("2020-04-01"), ymin = 0, ymax = 4.5 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#9b332b",
+            alpha = 2/3) +
+  geom_rect(aes(xmin = ymd("2020-10-01"), xmax = ymd("2021-04-01"), ymin = 0, ymax = 4.5 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#9b332b",
+            alpha = 2/3) +
+  geom_rect(aes(xmin = ymd("2017-07-01"), xmax = ymd("2017-10-01"), ymin = 0, ymax = 4.5 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  geom_rect(aes(xmin = ymd("2018-04-01"), xmax = ymd("2018-10-01"), ymin = 0, ymax = 4.5 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  geom_rect(aes(xmin = ymd("2019-04-01"), xmax = ymd("2019-10-01"), ymin = 0, ymax = 4.5 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  geom_rect(aes(xmin = ymd("2020-04-01"), xmax = ymd("2020-10-01"), ymin = 0, ymax = 4.5 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  geom_rect(aes(xmin = ymd("2021-04-01"), xmax = ymd("2021-07-01"), ymin = 0, ymax = 4.5 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  # Estimates
+  geom_pointrange(aes(y = median, ymin = lower, ymax = upper, shape = site),
+                  color = "#333333",
+                  size = 0.3) +
+  # Axes
+  scale_x_date(date_breaks = "1 year",
+               date_labels = "%m-%Y",
+               expand = c(0, 0)) +
+  scale_y_continuous(breaks = seq(1, 5, 1),
+                     expand = c(0, 0)) +
+  coord_cartesian(ylim = c(0, 4.5)) +
+  labs(x = "Primary survey occasion",
+       y = expression(paste("Hazard rate of gaining ", italic("Bd"))))
+
+# psi21
+mean.psi21.raw <- m2draws %>%
+  select(starts_with("mean.psi21"))
+mean.psi21 <- tibble(median = apply(-log(mean.psi21.raw), 2, median),
+                   lower = apply(-log(mean.psi21.raw), 2, function(x) hdi(x))[1,],
+                   upper = apply(-log(mean.psi21.raw), 2, function(x) hdi(x))[2,])
+# Plot
+figSpsi21 <- 
+  mean.psi21[1:66,] %>%
+  mutate(site = factor(c(rep("Brindle Creek",n.prim-1), rep("Tuntable Creek",n.prim-1), rep("Bat Cave Creek", n.prim-1)),
+                       levels = c("Brindle Creek", "Tuntable Creek", "Bat Cave Creek")),
+         date = dates.long.22,
+         primary = c(rep(1:(n.prim-1), n.site))) %>%
+  ggplot(aes(x = date)) +
+  facet_wrap(~ site, scales = "free") +
+  # Seasons
+  geom_rect(aes(xmin = ymd("2017-10-01"), xmax = ymd("2018-04-01"), ymin = 0, ymax = 18 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#9b332b",
+            alpha = 2/3) +
+  geom_rect(aes(xmin = ymd("2018-10-01"), xmax = ymd("2019-04-01"), ymin = 0, ymax = 18 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#9b332b",
+            alpha = 2/3) +
+  geom_rect(aes(xmin = ymd("2019-10-01"), xmax = ymd("2020-04-01"), ymin = 0, ymax = 18 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#9b332b",
+            alpha = 2/3) +
+  geom_rect(aes(xmin = ymd("2020-10-01"), xmax = ymd("2021-04-01"), ymin = 0, ymax = 18 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#9b332b",
+            alpha = 2/3) +
+  geom_rect(aes(xmin = ymd("2017-07-01"), xmax = ymd("2017-10-01"), ymin = 0, ymax = 18 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  geom_rect(aes(xmin = ymd("2018-04-01"), xmax = ymd("2018-10-01"), ymin = 0, ymax = 18 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  geom_rect(aes(xmin = ymd("2019-04-01"), xmax = ymd("2019-10-01"), ymin = 0, ymax = 18 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  geom_rect(aes(xmin = ymd("2020-04-01"), xmax = ymd("2020-10-01"), ymin = 0, ymax = 18 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  geom_rect(aes(xmin = ymd("2021-04-01"), xmax = ymd("2021-07-01"), ymin = 0, ymax = 18 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  # Estimates
+  geom_pointrange(aes(y = median, ymin = lower, ymax = upper, shape = site),
+                  color = "#333333",
+                  size = 0.3) +
+  # Axes
+  scale_color_manual(values = c("#333333", "white")) +
+  scale_x_date(date_breaks = "1 year",
+               date_labels = "%m-%Y",
+               expand = c(0, 0)) +
+  scale_y_continuous(breaks = seq(4, 20, 4),
+                     expand = c(0, 0)) +
+  coord_cartesian(ylim = c(0, 18)) +
+  labs(x = "Primary survey occasion",
+       y = expression(paste("Hazard rate of clearing ", italic("Bd"))))
+
+# p
+mean.p.raw <- m2draws %>%
+  select(starts_with("mean.p"))
+mean.p <- tibble(median = apply(mean.p.raw, 2, median),
+                   lower = apply(mean.p.raw, 2, function(x) hdi(x))[1,],
+                   upper = apply(mean.p.raw, 2, function(x) hdi(x))[2,])
+surveyed <- apply(all.caps + new.caps, 1:2, function(x) ifelse(x == 0, 0, 1))[-1,]
+
+# Plot
+figSp <- 
+  mean.p[1:66,] %>%
+  mutate(site = factor(c(rep("Brindle Creek",n.prim-1), rep("Tuntable Creek",n.prim-1), rep("Bat Cave Creek", n.prim-1)),
+                       levels = c("Brindle Creek", "Tuntable Creek", "Bat Cave Creek")),
+         date = dates.long.22,
+         primary = c(rep(1:(n.prim-1), n.site)),
+         surveyed = c(surveyed)) %>%
+  ggplot(aes(x = date)) +
+  facet_wrap(~ site, scales = "free") +
+  # Seasons
+  geom_rect(aes(xmin = ymd("2017-10-01"), xmax = ymd("2018-04-01"), ymin = 0, ymax = 1.0029 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#9b332b",
+            alpha = 2/3) +
+  geom_rect(aes(xmin = ymd("2018-10-01"), xmax = ymd("2019-04-01"), ymin = 0, ymax = 1.0029 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#9b332b",
+            alpha = 2/3) +
+  geom_rect(aes(xmin = ymd("2019-10-01"), xmax = ymd("2020-04-01"), ymin = 0, ymax = 1.0029 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#9b332b",
+            alpha = 2/3) +
+  geom_rect(aes(xmin = ymd("2020-10-01"), xmax = ymd("2021-04-01"), ymin = 0, ymax = 1.0029 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#9b332b",
+            alpha = 2/3) +
+  geom_rect(aes(xmin = ymd("2017-07-01"), xmax = ymd("2017-10-01"), ymin = 0, ymax = 1.0029 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  geom_rect(aes(xmin = ymd("2018-04-01"), xmax = ymd("2018-10-01"), ymin = 0, ymax = 1.0029 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  geom_rect(aes(xmin = ymd("2019-04-01"), xmax = ymd("2019-10-01"), ymin = 0, ymax = 1.0029 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  geom_rect(aes(xmin = ymd("2020-04-01"), xmax = ymd("2020-10-01"), ymin = 0, ymax = 1.0029 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  geom_rect(aes(xmin = ymd("2021-04-01"), xmax = ymd("2021-07-01"), ymin = 0, ymax = 1.0029 / 20),
+            data = tibble(date = dates.long.22)[1,],
+            fill = "#41485f",
+            alpha = 1/2) +
+  # Estimates
+  geom_pointrange(aes(y = median, ymin = lower, ymax = upper, shape = site, col = surveyed == 0),
+                  size = 0.3) +
+  # Scales
+  scale_color_manual(values = c("#333333", "white")) +
+  facet_wrap(~ site, scales = "free") +
+  scale_x_date(date_breaks = "1 year",
+               date_labels = "%m-%Y",
+               expand = c(0, 0)) +
+  scale_y_continuous(breaks = seq(0.2, 1, 0.2),
+                     limits = c(0, 1.0029),
+                     expand = c(0, 0)) +
+  labs(x = "Primary survey occasion",
+       y = "Recapture probability")
+
+# Main and save
+figS2 <- figSphi / figSpsi12 / figSpsi21 / figSp +
+  plot_annotation(tag_levels = "a") &
+  theme(plot.tag = element_text(face = "bold"))
+
+ggsave("figs/fig-s2.jpg", figS2, height = 10, width = 9, units = "in", dpi = 600)
+```
