@@ -3,7 +3,7 @@ title: "*Bd* infection prevalence and intensity analysis"
 author: |
   | Matthijs Hollanders, Laura F. Grogan, Catherine J. Nock, Hamish I. McCallum, David A. Newell
   | 
-  | Manuscript: Recovered frog populations coexist with endemic *Batrachochytrium dendrobatidis* despite intensity-dependent mortality
+  | Manuscript: Recovered frog populations coexist with endemic *Batrachochytrium dendrobatidis* despite load-dependent mortality
   | Journal: Ecological Applications
 editor_options: 
   chunk_output_type: console
@@ -500,11 +500,11 @@ fig.Psi2 <-
 N.temp <- array(NA, c(n.pred, nrow(m1draws), 2))
 for(i in 1:n.pred){
   # Temp when dry
-  N.temp[i,,1] <- exp(m1draws$`N.alpha[4]` + # M. fleayi 
+  N.temp[i,,1] <- exp(m1draws$`N.mean` + # M. fleayi 
                         m1draws$`N.beta[1]` * temp.pred.scaled[i] +
                         m1draws$`N.beta[2]` * dry)
   # Temp when dry
-  N.temp[i,,2] <- exp(m1draws$`N.alpha[4]` + # M. fleayi
+  N.temp[i,,2] <- exp(m1draws$`N.mean` + # M. fleayi
                         m1draws$`N.beta[1]` * temp.pred.scaled[i] +
                         m1draws$`N.beta[2]` * wet)
 }

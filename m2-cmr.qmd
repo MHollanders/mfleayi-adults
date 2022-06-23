@@ -3,7 +3,7 @@ title: "Capture-recapture analysis"
 author: |
   | Matthijs Hollanders, Laura F. Grogan, Catherine J. Nock, Hamish I. McCallum, David A. Newell
   | 
-  | Manuscript: Recovered frog populations coexist with endemic *Batrachochytrium dendrobatidis* despite intensity-dependent mortality
+  | Manuscript: Recovered frog populations coexist with endemic *Batrachochytrium dendrobatidis* despite load-dependent mortality
   | Journal: Ecological Applications
 editor_options: 
   chunk_output_type: console
@@ -15,7 +15,6 @@ editor_options:
 library(tidyverse)
 library(abind)
 library(lmodel2)
-library(scales)
 library(patchwork)
 library(ggforce)
 library(ggtext)
@@ -44,8 +43,8 @@ ch.ms[ch.ms == 0] <- 3
 # Metadata (continued)
 n.sec <- apply(ch[1,,,], c(1, 3), function(x) length(which(!is.na(x))))  # Secondaries
 n.sec[n.sec == 0] <- 1
-ints <- read.csv("data/ints.csv", header = T)                                 # Primary intervals
-dates <- read_csv("data/dates.csv") %>%                                       # Primary dates
+ints <- read.csv("data/ints.csv", header = T)                            # Primary intervals
+dates <- read_csv("data/dates.csv") %>%                                  # Primary dates
   mutate(brindle = dmy(brindle),
          tuntable = dmy(tuntable),
          batcave = dmy(batcave)) 
@@ -182,44 +181,44 @@ m2code <- nimbleCode({
   # Survival (phi)
   phi.alpha ~ dexp(1)
   for(i in 1:7){
-    phi.beta[i] ~ dt(0, sigma = 1, df = 4)
+    phi.beta[i] ~ dt(0, sigma = 2.5, df = 1)
     phi.w[i] ~ dbern(psi)
   }
   
   # Gaining infection (psi12)
   psi12.alpha ~ dexp(1)
   for(i in 1:4){
-    psi12.beta[i] ~ dt(0, sigma = 1, df = 4)
+    psi12.beta[i] ~ dt(0, sigma = 2.5, df = 1)
     psi12.w[i] ~ dbern(psi)
   }
   
   # Clearing infection (psi21)
   psi21.alpha ~ dexp(1)
   for(i in 1:5){
-    psi21.beta[i] ~ dt(0, sigma = 1, df = 4)
+    psi21.beta[i] ~ dt(0, sigma = 2.5, df = 1)
     psi21.w[i] ~ dbern(psi)
   }
   
   # Recapture (p)
   p.alpha ~ dbeta(1, 1)
   for(i in 1:7){
-    p.beta[i] ~ dt(0, sigma = 1, df = 4)
+    p.beta[i] ~ dt(0, sigma = 2.5, df = 1)
     p.w[i] ~ dbern(psi)
   }
   for(i in 1:2){
-    p.sigma[i] ~ T(dt(0, sigma = 1, df = 4), 0, )
+    p.sigma[i] ~ T(dt(0, sigma = 2.5, df = 1), 0, )
   }
   
   # Correlated random site effects (see NIMBLE manual section 5.2.4.1.2)
   for(i in 1:4){
-    sigma.site[i] ~ T(dt(0, sigma = 1, df = 4), 0, )
+    sigma.site[i] ~ T(dt(0, sigma = 2.5, df = 1), 0, )
   }
   chol.site[1:4,1:4] ~ dlkj_corr_cholesky(1.5, 4)                    # Prior on Cholesky factor
   cor.site[1:4,1:4] <- t(chol.site[1:4,1:4]) %*% chol.site[1:4,1:4]  # Correlation matrix
   
   # Correlated random survey effects
   for(i in 1:3){
-    sigma.survey[i] ~ T(dt(0, sigma = 1, df = 4), 0, )
+    sigma.survey[i] ~ T(dt(0, sigma = 2.5, df = 1), 0, )
   }
   chol.survey[1:3,1:3] ~ dlkj_corr_cholesky(1.5, 3)                        # Prior on Cholesky factor
   cor.survey[1:3,1:3] <- t(chol.survey[1:3,1:3]) %*% chol.survey[1:3,1:3]  # Correlation matrix
@@ -229,13 +228,13 @@ m2code <- nimbleCode({
   # Scaled mass index
   SMI.alpha <- 0  # Centered predictor
   for(i in 1:2){
-    SMI.sigma[i] ~ T(dt(0, sigma = 1, df = 4), 0, )
+    SMI.sigma[i] ~ T(dt(0, sigma = 2.5, df = 1), 0, )
   }
   
   # Infection intensity
   load.alpha <- 0  # Centered predictor
   for(i in 1:3){
-    load.beta[i] ~ dt(0, sigma = 1, df = 4)
+    load.beta[i] ~ dt(0, sigma = 2.5, df = 1)
     load.w[i] ~ dbern(psi)
   }
   for(i in 1:2){
@@ -703,7 +702,7 @@ MCMCtrace(m2samples, params = parents, Rhat = T, n.eff = T, ind = T)
 # Figures
 
 ```{r}
-# Load previous run samples 
+# Load previous run samples and calculate site average intercepts
 m2draws <- read_csv("mcmc-samples/m2-draws.csv") %>%
   mutate(`phi.alpha.mu` = exp((3 * log(`phi.alpha`) + `eps.site[1, 1]` + `eps.site[1, 2]` + `eps.site[1, 3]`) / 3),
          `psi12.alpha.mu` = exp((3 * log(`psi12.alpha`) + `eps.site[2, 1]` + `eps.site[2, 2]` + `eps.site[2, 3]`) / 3),
@@ -1033,7 +1032,6 @@ figcmr <- (figcmrphi | figcmrpsi12) / (figcmrpsi21 | figcmrp) +
 
 ggsave("figs/fig-cmr.jpg", figcmr, height = 5, width = 6, units = "in", dpi = 600)
 ```
-
 
 ## Apparent mortality as a function of *Bd* infection intensity 
 
